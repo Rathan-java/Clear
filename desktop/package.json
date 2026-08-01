@@ -1,0 +1,87 @@
+{
+  "name": "clear-desktop",
+  "productName": "Clear",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Clear - AI Meeting Assistant for Windows",
+  "author": {
+    "name": "ARA",
+    "email": "support@clear.app"
+  },
+  "main": "src/main/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "icons": "node scripts/generate-icons.js",
+    "dev:renderer": "vite",
+    "dev:main": "cross-env CLEAR_DEV_SERVER=http://localhost:5173 electron .",
+    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm run dev:renderer\" \"wait-on tcp:5173 && npm run dev:main\"",
+    "build:renderer": "vite build",
+    "build": "node scripts/build-win.js",
+    "build:dir": "npm run icons && npm run build:renderer && electron-builder --win --dir",
+    "start": "electron .",
+    "test:pipeline": "node scripts/pipeline-check.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.5"
+  },
+  "optionalDependencies": {
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.8",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "app.clear.meetingassistant",
+    "productName": "Clear",
+    "copyright": "Copyright (c) 2026 ARA",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/main/**/*",
+      "src/audio/**/*",
+      "src/speech/**/*",
+      "src/gemini/**/*",
+      "src/websocket/**/*",
+      "src/tray/**/*",
+      "src/settings/**/*",
+      "src/core/**/*",
+      "dist/ui/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "**/node_modules/ffmpeg-static/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "ARA Meeting Assistant Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Clear",
+      "uninstallDisplayName": "Clear - AI Meeting Assistant",
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

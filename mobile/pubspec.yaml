@@ -1,0 +1,37 @@
+name: clear_mobile
+description: Clear - AI meeting assistant. Answers from your desktop, on your phone.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  # Color.withValues() is used throughout the theme, which needs Flutter 3.27+.
+  sdk: '>=3.6.0 <4.0.0'
+  flutter: '>=3.27.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # state
+  flutter_riverpod: ^2.5.1
+
+  # realtime + network
+  socket_io_client: ^2.0.3+1
+  http: ^1.2.2
+
+  # storage
+  flutter_secure_storage: ^9.2.2
+  shared_preferences: ^2.3.2
+
+  # platform features
+  flutter_local_notifications: ^17.2.3
+  share_plus: ^10.0.2
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

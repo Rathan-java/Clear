@@ -1,0 +1,527 @@
+'use strict';
+
+const path = require('path');
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  shell,
+  session,
+  desktopCapturer,
+  globalShortcut,
+  Notification,
+  safeStorage,
+  nativeImage,
+} = require('electron');
+
+const logger = require('../core/logger');
+const { SettingsStore } = require('../settings/SettingsStore');
+const { setAutoLaunch, isAutoLaunchEnabled, wasAutoLaunched } = require('../settings/autoLaunch');
+const { ApiClient } = require('../websocket/ApiClient');
+const { SocketClient } = require('../websocket/SocketClient');
+const { GeminiService } = require('../gemini/GeminiService');
+const { SpeechService } = require('../speech/SpeechService');
+const { AudioCaptureService } = require('../audio/AudioCaptureService');
+const { Pipeline } = require('../core/Pipeline');
+const { TrayManager } = require('../tray/TrayManager');
+
+// Single instance: launching again just focuses the running app.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+
+const DEV_SERVER = process.env.CLEAR_DEV_SERVER || null;
+
+let mainWindow = null;
+let tray = null;
+let quitting = false;
+let services = null;
+
+// ---------------------------------------------------------------------------
+// Window
+// ---------------------------------------------------------------------------
+
+const createWindow = () => {
+  const window = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 900,
+    minHeight: 620,
+    show: false,
+    backgroundColor: '#0b1020',
+    autoHideMenuBar: true,
+    title: 'Clear',
+    icon: appIcon(),
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false,
+    },
+  });
+
+  if (DEV_SERVER) {
+    window.loadURL(DEV_SERVER);
+    window.webContents.openDevTools({ mode: 'detach' });
+  } else {
+    window.loadFile(path.join(__dirname, '..', '..', 'dist', 'ui', 'index.html'));
+  }
+
+  // Minimise / close go to the tray instead of killing the capture.
+  window.on('minimize', (event) => {
+    if (services?.settings.get('behaviour.minimiseToTray')) {
+      event.preventDefault();
+      window.hide();
+    }
+  });
+
+  window.on('close', (event) => {
+    if (!quitting && services?.settings.get('behaviour.minimiseToTray')) {
+      event.preventDefault();
+      window.hide();
+      tray?.notify('Clear is still running', 'Listening continues in the background. Right-click the tray icon to quit.');
+    }
+  });
+
+  window.on('closed', () => {
+    mainWindow = null;
+  });
+
+  // External links open in the real browser, never in the app shell.
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  return window;
+};
+
+const appIcon = () => {
+  try {
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    const icons = require('../tray/icons.js');
+    return nativeImage.createFromBuffer(Buffer.from(icons.live.x32, 'base64'));
+  } catch {
+    return undefined;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// System audio (WASAPI loopback through Chromium)
+// ---------------------------------------------------------------------------
+
+const configureLoopbackAudio = () => {
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (request, callback) => {
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        // 'loopback' = WASAPI loopback of the current default playback device.
+        // We hand back a screen source because Chromium requires a video track
+        // to exist; the renderer stops it immediately and keeps only audio.
+        callback({ video: sources[0], audio: 'loopback' });
+      } catch (error) {
+        log.error('Loopback capture was refused', { error: error.message });
+        callback({});
+      }
+    },
+    { useSystemPicker: false }
+  );
+
+  // Microphone / specific-device capture still needs the normal permission grant.
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(['media', 'audioCapture', 'notifications', 'display-capture'].includes(permission));
+  });
+};
+
+const log = logger.scoped('main');
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+const buildServices = () => {
+  const settings = new SettingsStore({
+    userDataPath: app.getPath('userData'),
+    safeStorage,
+    logger: logger.scoped('settings'),
+  });
+
+  const api = new ApiClient({ settings, logger: logger.scoped('api') });
+
+  const gemini = new GeminiService({
+    getApiKey: () => settings.getSecret('geminiApiKey'),
+    getConfig: () => settings.get('gemini'),
+    logger: logger.scoped('gemini'),
+  });
+
+  const speech = new SpeechService({ gemini, settings, logger: logger.scoped('speech') });
+
+  const audio = new AudioCaptureService({
+    getWindow: () => mainWindow,
+    settings,
+    logger: logger.scoped('audio'),
+  });
+
+  const socket = new SocketClient({ api, settings, logger: logger.scoped('socket') });
+
+  const pipeline = new Pipeline({ audio, speech, gemini, socket, api, settings, logger: logger.scoped('pipeline') });
+
+  return { settings, api, gemini, speech, audio, socket, pipeline };
+};
+
+const broadcast = (channel, payload) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+};
+
+const registerIpc = () => {
+  const { settings, api, gemini, speech, audio, socket, pipeline } = services;
+
+  const ok = (data = {}) => ({ ok: true, ...data });
+  const fail = (error) => ({ ok: false, error: error.message || String(error) });
+
+  ipcMain.handle('app:state', () => pipeline.snapshot());
+  ipcMain.handle('app:logs', (_event, count) => logger.recent(count || 120));
+  ipcMain.handle('app:info', () => ({
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    userData: app.getPath('userData'),
+    logFile: logger.logFilePath(),
+    autoLaunch: isAutoLaunchEnabled(app),
+    encryptionAvailable: settings.encryptionAvailable,
+  }));
+
+  ipcMain.handle('settings:get', () => settings.public());
+  ipcMain.handle('settings:patch', async (_event, partial) => {
+    const before = settings.get('backendUrl');
+    const result = settings.patch(partial || {});
+
+    if (partial?.behaviour && 'autoLaunch' in partial.behaviour) {
+      setAutoLaunch(app, partial.behaviour.autoLaunch, log);
+    }
+    if (partial?.ui && 'alwaysOnTop' in partial.ui) {
+      mainWindow?.setAlwaysOnTop(Boolean(partial.ui.alwaysOnTop));
+    }
+    if (partial?.backendUrl && partial.backendUrl !== before && api.signedIn) {
+      socket.connect().catch((error) => log.warn('Reconnect after URL change failed', { error: error.message }));
+    }
+
+    pipeline.emitState();
+    return result;
+  });
+  ipcMain.handle('settings:reset', () => {
+    settings.reset();
+    return settings.public();
+  });
+
+  ipcMain.handle('auth:login', async (_event, { email, password }) => {
+    try {
+      const result = await api.login({ email, password });
+      await socket.connect();
+      pipeline.emitState();
+      return ok({ user: result.user });
+    } catch (error) {
+      log.error('Login failed', { error: error.message });
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('auth:logout', async () => {
+    await pipeline.stop({ endMeeting: true }).catch(() => {});
+    socket.disconnect();
+    await api.logout();
+    pipeline.emitState();
+    return ok();
+  });
+
+  ipcMain.handle('pair:code', async () => {
+    try {
+      return ok(await api.createPairingCode());
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('devices:list', async () => {
+    try {
+      return ok({ devices: await audio.listAudioDevices() });
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('devices:select', async (_event, deviceId) => {
+    try {
+      return ok({ selected: await audio.selectDevice(deviceId) });
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('capture:start', async () => {
+    try {
+      await pipeline.start();
+      return ok();
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('capture:stop', async () => {
+    try {
+      await pipeline.stop();
+      return ok();
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('capture:toggle', async () => {
+    try {
+      await pipeline.toggle();
+      return ok({ running: pipeline.running });
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('transcript:clear', () => {
+    pipeline.clearTranscript();
+    return ok();
+  });
+
+  ipcMain.handle('gemini:test', async () => {
+    try {
+      return ok(await gemini.testConnection());
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('ask:manual', async (_event, text) => {
+    try {
+      const answer = await pipeline.answer({ transcript: text, question: text, manual: true });
+      return answer ? ok({ answer }) : fail(new Error('No answer was generated'));
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('history:list', async (_event, params) => {
+    try {
+      return ok(await api.history(params || {}));
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('connection:reconnect', async () => {
+    try {
+      await socket.connect();
+      return ok(socket.status());
+    } catch (error) {
+      return fail(error);
+    }
+  });
+
+  ipcMain.handle('window:minimise', () => {
+    mainWindow?.minimize();
+    return ok();
+  });
+  ipcMain.handle('window:hide', () => {
+    mainWindow?.hide();
+    return ok();
+  });
+  ipcMain.handle('window:setAlwaysOnTop', (_event, value) => {
+    mainWindow?.setAlwaysOnTop(Boolean(value));
+    settings.patch({ ui: { alwaysOnTop: Boolean(value) } });
+    return ok();
+  });
+  ipcMain.handle('app:quit', () => {
+    quitApp();
+    return ok();
+  });
+
+  ipcMain.handle('system:openLogs', () => {
+    const file = logger.logFilePath();
+    if (file) shell.showItemInFolder(file);
+    return ok();
+  });
+  ipcMain.handle('system:openExternal', (_event, url) => {
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    return ok();
+  });
+
+  // Audio engine messages (device lists, PCM frames, errors).
+  ipcMain.on('capture:message', (_event, message) => audio.handleRendererMessage(message));
+};
+
+const wireNotifications = () => {
+  const { pipeline, settings } = services;
+
+  let lastStateAt = 0;
+  pipeline.on('state', (state, { quiet } = {}) => {
+    tray?.update(state);
+    // Level updates arrive ~10x/second; do not flood the renderer with full state.
+    const now = Date.now();
+    if (quiet && now - lastStateAt < 200) return;
+    lastStateAt = now;
+    broadcast('app:state', state);
+  });
+
+  pipeline.on('answer', (answer) => {
+    broadcast('app:answer', answer);
+
+    if (settings.get('behaviour.notifyOnAnswer') && Notification.isSupported() && !mainWindow?.isVisible()) {
+      const notification = new Notification({
+        title: answer.question ? truncate(answer.question, 60) : 'Clear has an answer',
+        body: truncate(answer.answer, 180),
+        silent: false,
+      });
+      notification.on('click', () => {
+        mainWindow?.show();
+        mainWindow?.focus();
+      });
+      notification.show();
+    }
+  });
+
+  logger.onEntry((entry) => {
+    if (entry.level === 'debug') return;
+    broadcast('app:log', entry);
+  });
+};
+
+const bootstrap = async () => {
+  const { settings, api, socket, pipeline, audio } = services;
+
+  // Restore the session silently if we have a refresh token.
+  if (api.signedIn) {
+    try {
+      await api.ensureToken();
+      await socket.connect();
+      log.info('Session restored');
+    } catch (error) {
+      log.warn('Could not restore the session', { error: error.message });
+    }
+  }
+
+  // Reflect the real Windows state rather than what we last wrote.
+  const actualAutoLaunch = isAutoLaunchEnabled(app);
+  if (actualAutoLaunch !== settings.get('behaviour.autoLaunch')) {
+    settings.patch({ behaviour: { autoLaunch: actualAutoLaunch } });
+  }
+
+  // The renderer owns the audio engine, so wait for its bridge to attach
+  // before asking it what devices exist.
+  audio.whenReady().then((ready) => {
+    if (!ready) return log.warn('Audio engine did not report ready - device list may be empty');
+    return audio
+      .listAudioDevices()
+      .catch((error) => log.warn('Device enumeration failed', { error: error.message }));
+  });
+
+  if (settings.get('behaviour.autoStartCapture') && api.signedIn) {
+    setTimeout(() => {
+      pipeline.start().catch((error) => log.warn('Auto-start failed', { error: error.message }));
+    }, 2500);
+  }
+
+  pipeline.emitState();
+};
+
+const quitApp = async () => {
+  quitting = true;
+  try {
+    await services?.pipeline.stop({ endMeeting: true });
+  } catch {
+    /* shutting down anyway */
+  }
+  services?.socket.destroy();
+  services?.audio.destroy();
+  tray?.destroy();
+  app.quit();
+};
+
+// ---------------------------------------------------------------------------
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+app.whenReady().then(async () => {
+  logger.init(app.getPath('userData'));
+  log.info('Clear starting', { version: app.getVersion(), electron: process.versions.electron });
+
+  app.setAppUserModelId('app.clear.meetingassistant');
+  configureLoopbackAudio();
+
+  services = buildServices();
+  mainWindow = createWindow();
+  registerIpc();
+  wireNotifications();
+
+  tray = new TrayManager({
+    app,
+    getWindow: () => mainWindow,
+    pipeline: services.pipeline,
+    logger: logger.scoped('tray'),
+    onQuit: quitApp,
+  });
+  tray.create();
+
+  const startHidden =
+    wasAutoLaunched(app) || services.settings.get('behaviour.startMinimised');
+
+  mainWindow.once('ready-to-show', () => {
+    if (!startHidden) mainWindow.show();
+    if (services.settings.get('ui.alwaysOnTop')) mainWindow.setAlwaysOnTop(true);
+  });
+
+  globalShortcut.register('CommandOrControl+Shift+L', () => {
+    services.pipeline.toggle().catch((error) => log.error('Hotkey toggle failed', { error: error.message }));
+  });
+  globalShortcut.register('CommandOrControl+Shift+C', () => {
+    if (mainWindow?.isVisible()) mainWindow.hide();
+    else {
+      mainWindow?.show();
+      mainWindow?.focus();
+    }
+  });
+
+  await bootstrap();
+});
+
+app.on('window-all-closed', () => {
+  // Tray app: closing the dashboard does not quit.
+  if (process.platform !== 'win32' && !services?.settings.get('behaviour.minimiseToTray')) app.quit();
+});
+
+app.on('activate', () => {
+  if (!mainWindow) {
+    mainWindow = createWindow();
+    mainWindow.once('ready-to-show', () => mainWindow.show());
+  }
+});
+
+app.on('before-quit', () => {
+  quitting = true;
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
+});
+
+process.on('uncaughtException', (error) => {
+  log.error('Uncaught exception in main', { error: error.message, stack: error.stack });
+});
+
+const truncate = (text, max) => {
+  const value = String(text || '').replace(/\s+/g, ' ').trim();
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+};

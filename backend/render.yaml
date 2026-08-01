@@ -1,0 +1,29 @@
+# Render.com free-tier blueprint.
+#   1. Push this repo to GitHub
+#   2. Render -> New -> Blueprint -> pick the repo
+#   3. Fill the secrets marked sync:false in the dashboard
+services:
+  - type: web
+    name: clear-backend
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: '*'
+      - key: ALLOW_AUTO_REGISTER
+        value: 'true'
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: FIREBASE_SERVICE_ACCOUNT_BASE64
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        sync: false
