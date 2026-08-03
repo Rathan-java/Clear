@@ -20,8 +20,6 @@ class ApiClient {
   Future<void>? _refreshing;
 
   String get baseUrl => _storage.backendUrl;
-  String? get accessToken => _accessToken;
-  set accessToken(String? value) => _accessToken = value;
 
   Uri _uri(String path, [Map<String, String>? query]) =>
       Uri.parse('$baseUrl$path').replace(queryParameters: query?.isEmpty ?? true ? null : query);

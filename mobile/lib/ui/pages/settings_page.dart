@@ -120,10 +120,10 @@ class SettingsPage extends ConsumerWidget {
           _Section(
             title: 'About',
             children: [
-              ListTile(
-                leading: const Icon(Icons.info_outline),
-                title: const Text('${AppConfig.appName} for Android'),
-                subtitle: const Text('Version 1.0.0'),
+              const ListTile(
+                leading: Icon(Icons.info_outline),
+                title: Text('${AppConfig.appName} for Android'),
+                subtitle: Text('Version 1.0.0'),
               ),
               ListTile(
                 leading: const Icon(Icons.smartphone),

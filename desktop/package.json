@@ -15,12 +15,12 @@
   "scripts": {
     "icons": "node scripts/generate-icons.js",
     "dev:renderer": "vite",
-    "dev:main": "cross-env CLEAR_DEV_SERVER=http://localhost:5173 electron .",
+    "dev:main": "node scripts/start-electron.js http://localhost:5173",
     "dev": "concurrently -k -n vite,electron -c cyan,magenta \"npm run dev:renderer\" \"wait-on tcp:5173 && npm run dev:main\"",
     "build:renderer": "vite build",
     "build": "node scripts/build-win.js",
     "build:dir": "npm run icons && npm run build:renderer && electron-builder --win --dir",
-    "start": "electron .",
+    "start": "node scripts/start-electron.js",
     "test:pipeline": "node scripts/pipeline-check.js"
   },
   "dependencies": {
