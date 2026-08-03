@@ -14,7 +14,12 @@ const { EventEmitter } = require('events');
  */
 
 const DEFAULTS = {
-  backendUrl: 'http://localhost:8080',
+  // Firebase web config. Neither value is a secret - they identify the project,
+  // they do not grant access. Security comes from Auth plus the Firestore rules.
+  firebase: {
+    apiKey: '',
+    projectId: '',
+  },
   gemini: {
     model: 'gemini-2.5-flash',
     transcribeModel: 'gemini-2.5-flash',
@@ -102,7 +107,8 @@ class SettingsStore extends EventEmitter {
     }
 
     // Environment variables bootstrap a fresh install (useful in dev / CI).
-    if (process.env.CLEAR_BACKEND_URL) this.data.backendUrl = process.env.CLEAR_BACKEND_URL;
+    if (process.env.CLEAR_FIREBASE_API_KEY) this.data.firebase.apiKey = process.env.CLEAR_FIREBASE_API_KEY;
+    if (process.env.CLEAR_FIREBASE_PROJECT_ID) this.data.firebase.projectId = process.env.CLEAR_FIREBASE_PROJECT_ID;
     if (process.env.GEMINI_API_KEY && !this.secrets.geminiApiKey) {
       this.secrets.geminiApiKey = process.env.GEMINI_API_KEY;
     }

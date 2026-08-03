@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../app.dart';
 import '../../core/config.dart';
 import '../../state/providers.dart';
-import 'pairing_page.dart';
 
 class LoginPage extends ConsumerStatefulWidget {
   const LoginPage({super.key});
@@ -19,17 +18,18 @@ class _LoginPageState extends ConsumerState<LoginPage> {
   final _formKey = GlobalKey<FormState>();
   final _email = TextEditingController();
   final _password = TextEditingController();
-  late final TextEditingController _backend =
-      TextEditingController(text: ref.read(settingsControllerProvider).backendUrl);
-
-  bool _showBackend = false;
   bool _obscure = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _email.text = ref.read(storageProvider).lastEmail ?? '';
+  }
 
   @override
   void dispose() {
     _email.dispose();
     _password.dispose();
-    _backend.dispose();
     super.dispose();
   }
 
@@ -40,13 +40,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
     final ok = await ref.read(authControllerProvider.notifier).signIn(
           email: _email.text.trim(),
           password: _password.text,
-          backendUrl: _backend.text.trim(),
         );
 
     if (!mounted || !ok) return;
-
-    final auth = ref.read(authControllerProvider);
-    Navigator.of(context).pushReplacementNamed(auth.isPaired ? HomeShell.route : PairingPage.route);
+    Navigator.of(context).pushReplacementNamed(HomeShell.route);
   }
 
   @override
@@ -82,8 +79,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Sign in with the same account as your desktop app. A new email creates an account.',
-                      style: TextStyle(color: scheme.onSurfaceVariant),
+                      'Sign in with the same account as your desktop app. That is the only setup - '
+                      'no pairing code, no Wi-Fi, no cable.',
+                      style: TextStyle(color: scheme.onSurfaceVariant, height: 1.45),
                     ),
                     const SizedBox(height: 28),
 
@@ -99,7 +97,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                       validator: (value) {
                         final text = (value ?? '').trim();
                         if (text.isEmpty) return 'Enter your email';
-                        if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(text)) return 'That does not look like an email';
+                        if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(text)) {
+                          return 'That does not look like an email';
+                        }
                         return null;
                       },
                     ),
@@ -118,25 +118,8 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                           onPressed: () => setState(() => _obscure = !_obscure),
                         ),
                       ),
-                      validator: (value) =>
-                          (value ?? '').length < 8 ? 'At least 8 characters' : null,
+                      validator: (value) => (value ?? '').length < 6 ? 'At least 6 characters' : null,
                     ),
-
-                    if (_showBackend) ...[
-                      const SizedBox(height: 14),
-                      TextFormField(
-                        controller: _backend,
-                        keyboardType: TextInputType.url,
-                        autocorrect: false,
-                        decoration: const InputDecoration(
-                          labelText: 'Backend URL',
-                          prefixIcon: Icon(Icons.dns_outlined),
-                          helperText: 'e.g. https://clear-backend.onrender.com',
-                        ),
-                        validator: (value) =>
-                            Uri.tryParse((value ?? '').trim())?.hasScheme == true ? null : 'Enter a full URL',
-                      ),
-                    ],
 
                     if (auth.error != null) ...[
                       const SizedBox(height: 16),
@@ -154,11 +137,11 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                             )
                           : const Text('Sign in'),
                     ),
-                    const SizedBox(height: 10),
-                    TextButton.icon(
-                      onPressed: () => setState(() => _showBackend = !_showBackend),
-                      icon: Icon(_showBackend ? Icons.expand_less : Icons.expand_more, size: 20),
-                      label: Text(_showBackend ? 'Hide server settings' : 'Server settings'),
+                    const SizedBox(height: 14),
+                    Text(
+                      'A new email address creates the account.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 12.5),
                     ),
                   ],
                 ),

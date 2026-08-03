@@ -6,7 +6,7 @@ import '../widgets/answer_card.dart';
 import '../widgets/status_banner.dart';
 
 /// The page you leave open during a meeting: newest answer front and centre,
-/// live transcript underneath, everything else out of the way.
+/// live transcript underneath.
 class DashboardPage extends ConsumerStatefulWidget {
   const DashboardPage({super.key});
 
@@ -20,8 +20,7 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
   @override
   Widget build(BuildContext context) {
     final answers = ref.watch(answersControllerProvider);
-    final auth = ref.watch(authControllerProvider);
-    final transcript = ref.watch(transcriptProvider).valueOrNull ?? const <String>[];
+    final transcript = ref.watch(transcriptProvider).valueOrNull ?? const [];
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -33,51 +32,22 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
             icon: Icon(_showTranscript ? Icons.subtitles : Icons.subtitles_off_outlined),
             onPressed: () => setState(() => _showTranscript = !_showTranscript),
           ),
-          IconButton(
-            tooltip: 'Refresh',
-            icon: const Icon(Icons.refresh),
-            onPressed: () => ref.read(answersControllerProvider.notifier).load(refresh: true),
-          ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: () async {
-          await ref.read(answersControllerProvider.notifier).load(refresh: true);
-          await ref.read(authControllerProvider.notifier).refreshPairing();
-        },
+        onRefresh: () => ref.read(answersControllerProvider.notifier).refresh(),
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             const SliverToBoxAdapter(child: StatusBanner()),
 
-            if (auth.pairedDesktop != null)
+            if (answers.error != null)
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                  child: Row(
-                    children: [
-                      Icon(Icons.desktop_windows_outlined, size: 15, color: scheme.onSurfaceVariant),
-                      const SizedBox(width: 6),
-                      Text(
-                        'Paired with ${auth.pairedDesktop}',
-                        style: TextStyle(fontSize: 12.5, color: scheme.onSurfaceVariant),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            if (answers.answers.isEmpty && !answers.loading)
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: EmptyState(
-                  icon: Icons.auto_awesome_outlined,
-                  title: 'Waiting for the first question',
-                  body: 'Start listening on your desktop. When someone asks something, the answer lands here instantly.',
-                  action: OutlinedButton.icon(
-                    onPressed: () => ref.read(answersControllerProvider.notifier).load(refresh: true),
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('Check again'),
+                  child: Text(
+                    answers.error!,
+                    style: TextStyle(color: scheme.error, fontSize: 12.5),
                   ),
                 ),
               ),
@@ -86,6 +56,17 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
               const SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(child: CircularProgressIndicator()),
+              ),
+
+            if (!answers.loading && answers.answers.isEmpty)
+              const SliverFillRemaining(
+                hasScrollBody: false,
+                child: EmptyState(
+                  icon: Icons.auto_awesome_outlined,
+                  title: 'Waiting for the first question',
+                  body: 'Start listening on your desktop. When someone asks something in the meeting, '
+                      'the answer appears here within a second - wherever you are.',
+                ),
               ),
 
             if (answers.answers.isNotEmpty)
@@ -135,8 +116,13 @@ class _DashboardPageState extends ConsumerState<DashboardPage> {
                                 (line) => Padding(
                                   padding: const EdgeInsets.only(bottom: 8),
                                   child: Text(
-                                    line,
-                                    style: TextStyle(fontSize: 13.5, color: scheme.onSurfaceVariant, height: 1.4),
+                                    line.text,
+                                    style: TextStyle(
+                                      fontSize: 13.5,
+                                      color: line.isQuestion ? scheme.primary : scheme.onSurfaceVariant,
+                                      fontWeight: line.isQuestion ? FontWeight.w600 : FontWeight.normal,
+                                      height: 1.4,
+                                    ),
                                   ),
                                 ),
                               ),

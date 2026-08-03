@@ -13,3 +13,6 @@ key.properties
 .flutter-plugins
 .flutter-plugins-dependencies
 android/app/src/main/res/values/strings_override.xml
+
+# Firebase project config - not a credential, but keep it out of public repos
+android/app/google-services.json

@@ -1,0 +1,35 @@
+rules_version = '2';
+
+// Clear stores everything under users/{uid}. Both the desktop and the phone
+// sign in as the same user, so this single rule is the whole security model:
+// you can only ever touch your own documents, and nothing is readable
+// anonymously.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // answers, transcripts, meetings, devices
+      match /{collection}/{docId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+
+        // Writes must belong to the signed-in user and stay within sane sizes,
+        // so a stolen key cannot be used to dump data into your project.
+        allow create: if request.auth != null
+                      && request.auth.uid == userId
+                      && request.resource.data.size() < 25
+                      && (!('answer' in request.resource.data) || request.resource.data.answer.size() < 8000)
+                      && (!('transcript' in request.resource.data) || request.resource.data.transcript.size() < 8000)
+                      && (!('text' in request.resource.data) || request.resource.data.text.size() < 8000);
+
+        allow update, delete: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Everything else is closed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

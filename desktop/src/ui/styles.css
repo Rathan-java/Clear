@@ -786,6 +786,55 @@ input[type='range'] {
   font-size: 12px;
 }
 
+.login__note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-faint);
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: rgba(79, 140, 255, 0.08);
+  border: 1px solid rgba(79, 140, 255, 0.25);
+  border-radius: var(--radius-sm);
+}
+
+.flow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.flow__step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 13px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.flow__step strong {
+  display: block;
+  font-size: 13.5px;
+}
+
+.flow__step p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.flow__icon {
+  font-size: 20px;
+}
+
+.flow__arrow {
+  text-align: center;
+  color: var(--accent);
+  font-size: 15px;
+  line-height: 1;
+}
+
 .device-list {
   list-style: none;
   margin: 0;

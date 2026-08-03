@@ -17,8 +17,9 @@ const {
 const logger = require('../core/logger');
 const { SettingsStore } = require('../settings/SettingsStore');
 const { setAutoLaunch, isAutoLaunchEnabled, wasAutoLaunched } = require('../settings/autoLaunch');
-const { ApiClient } = require('../websocket/ApiClient');
-const { SocketClient } = require('../websocket/SocketClient');
+const { FirebaseAuth } = require('../firebase/FirebaseAuth');
+const { FirestoreClient } = require('../firebase/FirestoreClient');
+const { FirestoreSync } = require('../firebase/FirestoreSync');
 const { GeminiService } = require('../gemini/GeminiService');
 const { SpeechService } = require('../speech/SpeechService');
 const { AudioCaptureService } = require('../audio/AudioCaptureService');
@@ -148,7 +149,8 @@ const buildServices = () => {
     logger: logger.scoped('settings'),
   });
 
-  const api = new ApiClient({ settings, logger: logger.scoped('api') });
+  const auth = new FirebaseAuth({ settings, logger: logger.scoped('auth') });
+  const firestore = new FirestoreClient({ auth, settings, logger: logger.scoped('firestore') });
 
   const gemini = new GeminiService({
     getApiKey: () => settings.getSecret('geminiApiKey'),
@@ -164,11 +166,11 @@ const buildServices = () => {
     logger: logger.scoped('audio'),
   });
 
-  const socket = new SocketClient({ api, settings, logger: logger.scoped('socket') });
+  const sync = new FirestoreSync({ auth, firestore, settings, logger: logger.scoped('sync') });
 
-  const pipeline = new Pipeline({ audio, speech, gemini, socket, api, settings, logger: logger.scoped('pipeline') });
+  const pipeline = new Pipeline({ audio, speech, gemini, sync, auth, settings, logger: logger.scoped('pipeline') });
 
-  return { settings, api, gemini, speech, audio, socket, pipeline };
+  return { settings, auth, firestore, gemini, speech, audio, sync, pipeline };
 };
 
 const broadcast = (channel, payload) => {
@@ -176,7 +178,7 @@ const broadcast = (channel, payload) => {
 };
 
 const registerIpc = () => {
-  const { settings, api, gemini, speech, audio, socket, pipeline } = services;
+  const { settings, auth, gemini, audio, sync, pipeline } = services;
 
   const ok = (data = {}) => ({ ok: true, ...data });
   const fail = (error) => ({ ok: false, error: error.message || String(error) });
@@ -194,7 +196,7 @@ const registerIpc = () => {
 
   ipcMain.handle('settings:get', () => settings.public());
   ipcMain.handle('settings:patch', async (_event, partial) => {
-    const before = settings.get('backendUrl');
+    const beforeProject = settings.get('firebase.projectId');
     const result = settings.patch(partial || {});
 
     if (partial?.behaviour && 'autoLaunch' in partial.behaviour) {
@@ -203,8 +205,8 @@ const registerIpc = () => {
     if (partial?.ui && 'alwaysOnTop' in partial.ui) {
       mainWindow?.setAlwaysOnTop(Boolean(partial.ui.alwaysOnTop));
     }
-    if (partial?.backendUrl && partial.backendUrl !== before && api.signedIn) {
-      socket.connect().catch((error) => log.warn('Reconnect after URL change failed', { error: error.message }));
+    if (partial?.firebase?.projectId && partial.firebase.projectId !== beforeProject && auth.signedIn) {
+      sync.connect().catch((error) => log.warn('Reconnect after project change failed', { error: error.message }));
     }
 
     pipeline.emitState();
@@ -215,32 +217,27 @@ const registerIpc = () => {
     return settings.public();
   });
 
-  ipcMain.handle('auth:login', async (_event, { email, password }) => {
+  ipcMain.handle('auth:login', async (_event, { email, password, firebase }) => {
     try {
-      const result = await api.login({ email, password });
-      await socket.connect();
+      // The login screen can carry the Firebase config on first run.
+      if (firebase?.apiKey && firebase?.projectId) settings.patch({ firebase });
+
+      const user = await auth.signIn({ email, password });
+      await sync.connect();
       pipeline.emitState();
-      return ok({ user: result.user });
+      return ok({ user });
     } catch (error) {
-      log.error('Login failed', { error: error.message });
+      log.error('Sign-in failed', { code: error.code, error: error.message });
       return fail(error);
     }
   });
 
   ipcMain.handle('auth:logout', async () => {
     await pipeline.stop({ endMeeting: true }).catch(() => {});
-    socket.disconnect();
-    await api.logout();
+    sync.disconnect();
+    await auth.signOut();
     pipeline.emitState();
     return ok();
-  });
-
-  ipcMain.handle('pair:code', async () => {
-    try {
-      return ok(await api.createPairingCode());
-    } catch (error) {
-      return fail(error);
-    }
   });
 
   ipcMain.handle('devices:list', async () => {
@@ -310,7 +307,7 @@ const registerIpc = () => {
 
   ipcMain.handle('history:list', async (_event, params) => {
     try {
-      return ok(await api.history(params || {}));
+      return ok({ answers: await sync.history(params || {}) });
     } catch (error) {
       return fail(error);
     }
@@ -318,8 +315,8 @@ const registerIpc = () => {
 
   ipcMain.handle('connection:reconnect', async () => {
     try {
-      await socket.connect();
-      return ok(socket.status());
+      await sync.connect();
+      return ok(sync.status());
     } catch (error) {
       return fail(error);
     }
@@ -394,14 +391,14 @@ const wireNotifications = () => {
 };
 
 const bootstrap = async () => {
-  const { settings, api, socket, pipeline, audio } = services;
+  const { settings, auth, sync, pipeline, audio } = services;
 
-  // Restore the session silently if we have a refresh token.
-  if (api.signedIn) {
+  // Restore the session silently if we still hold a refresh token.
+  if (auth.signedIn && auth.configured) {
     try {
-      await api.ensureToken();
-      await socket.connect();
-      log.info('Session restored');
+      await auth.ensureToken();
+      await sync.connect();
+      log.info('Session restored', { uid: auth.uid });
     } catch (error) {
       log.warn('Could not restore the session', { error: error.message });
     }
@@ -422,7 +419,7 @@ const bootstrap = async () => {
       .catch((error) => log.warn('Device enumeration failed', { error: error.message }));
   });
 
-  if (settings.get('behaviour.autoStartCapture') && api.signedIn) {
+  if (settings.get('behaviour.autoStartCapture') && auth.signedIn) {
     setTimeout(() => {
       pipeline.start().catch((error) => log.warn('Auto-start failed', { error: error.message }));
     }, 2500);
@@ -438,7 +435,7 @@ const quitApp = async () => {
   } catch {
     /* shutting down anyway */
   }
-  services?.socket.destroy();
+  services?.sync.destroy();
   services?.audio.destroy();
   tray?.destroy();
   app.quit();

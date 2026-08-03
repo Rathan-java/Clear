@@ -183,7 +183,7 @@ const LivePanel = ({ state, devices, onToggle, onClear, onAsk, onSelectDevice, o
         <Metric label="Questions" value={stats.questions || 0} />
         <Metric label="Avg answer" value={stats.avgAnswerMs ? `${stats.avgAnswerMs} ms` : '—'} />
         <Metric label="Last answer" value={stats.lastAnswerMs ? `${stats.lastAnswerMs} ms` : '—'} />
-        <Metric label="Socket RTT" value={state.connection?.latencyMs != null ? `${state.connection.latencyMs} ms` : '—'} />
+        <Metric label="Cloud write" value={state.connection?.latencyMs != null ? `${state.connection.latencyMs} ms` : '—'} />
         <Metric label="Audio captured" value={`${Math.round((capture.capturedMs || 0) / 1000)}s`} />
         <Metric label="Errors" value={stats.errors || 0} tone={stats.errors ? 'bad' : undefined} />
       </div>

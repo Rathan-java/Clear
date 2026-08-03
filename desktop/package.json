@@ -23,9 +23,7 @@
     "start": "node scripts/start-electron.js",
     "test:pipeline": "node scripts/pipeline-check.js"
   },
-  "dependencies": {
-    "socket.io-client": "^4.7.5"
-  },
+  "dependencies": {},
   "optionalDependencies": {
     "ffmpeg-static": "^5.2.0"
   },
@@ -53,7 +51,7 @@
       "src/audio/**/*",
       "src/speech/**/*",
       "src/gemini/**/*",
-      "src/websocket/**/*",
+      "src/firebase/**/*",
       "src/tray/**/*",
       "src/settings/**/*",
       "src/core/**/*",

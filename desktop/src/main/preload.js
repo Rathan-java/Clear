@@ -17,7 +17,6 @@ const INVOKE_CHANNELS = new Set([
   'settings:reset',
   'auth:login',
   'auth:logout',
-  'pair:code',
   'devices:list',
   'devices:select',
   'capture:start',

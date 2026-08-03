@@ -8,7 +8,10 @@ const { EventEmitter } = require('events');
  * The one place that knows the whole flow:
  *
  *   speaker audio -> AudioCaptureService -> SpeechService (STT + question
- *   detection) -> GeminiService -> SocketClient -> phone
+ *   detection) -> GeminiService -> Firestore -> phone
+ *
+ * The phone is never contacted directly. The answer is written to Firestore and
+ * the phone's live listener picks it up, wherever it happens to be.
  *
  * It also owns the single app-state object the dashboard and tray render from.
  */
@@ -17,13 +20,13 @@ const MAX_TRANSCRIPT_LINES = 60;
 const MAX_ANSWERS = 30;
 
 class Pipeline extends EventEmitter {
-  constructor({ audio, speech, gemini, socket, api, settings, logger }) {
+  constructor({ audio, speech, gemini, sync, auth, settings, logger }) {
     super();
     this.audio = audio;
     this.speech = speech;
     this.gemini = gemini;
-    this.socket = socket;
-    this.api = api;
+    this.sync = sync;
+    this.auth = auth;
     this.settings = settings;
     this.log = logger;
 
@@ -37,7 +40,7 @@ class Pipeline extends EventEmitter {
       thinking: false,
       auth: { signedIn: false, email: null },
       capture: audio.state(),
-      connection: socket.status(),
+      connection: sync.status(),
       gemini: gemini.metrics(),
       speech: speech.metrics(),
       transcript: { live: '', lines: [] },
@@ -83,16 +86,12 @@ class Pipeline extends EventEmitter {
       this.emitState();
     });
 
-    // --- socket ------------------------------------------------------------
-    this.socket.on('status', (status) => {
+    // --- cloud sync --------------------------------------------------------
+    this.sync.on('status', (status) => {
       this.state.connection = status;
       this.emitState({ quiet: true });
     });
-    this.socket.on('paired', (payload) => {
-      this.state.notice = { type: 'success', message: 'Phone paired successfully' };
-      this.emit('paired', payload);
-      this.emitState();
-    });
+    this.sync.on('presence', () => this.emitState({ quiet: true }));
   }
 
   emitState({ quiet = false } = {}) {
@@ -101,9 +100,10 @@ class Pipeline extends EventEmitter {
     this.state.gemini = this.gemini.metrics();
     this.state.speech = this.speech.metrics();
     this.state.auth = {
-      signedIn: this.api.signedIn,
+      signedIn: this.auth.signedIn,
       email: this.settings.get('auth.email'),
       userId: this.settings.get('auth.userId'),
+      configured: this.auth.configured,
     };
     this.emit('state', this.state, { quiet });
   }
@@ -129,11 +129,11 @@ class Pipeline extends EventEmitter {
     }
     this.emitState();
 
-    // Persist + fan out the transcript (opt-out for the privacy conscious).
+    // Publish the transcript too (opt-out for the privacy conscious).
     if (this.settings.get('behaviour.sendTranscriptToCloud')) {
-      this.socket
-        .sendTranscript({ text: transcript, isQuestion: Boolean(question), endedAt: line.at })
-        .catch((error) => this.log?.debug('transcript emit failed', { error: error.message }));
+      this.sync
+        .sendTranscript({ text: transcript, isQuestion: Boolean(question) })
+        .catch((error) => this.log?.debug('transcript write failed', { error: error.message }));
     }
 
     const onlyQuestions = this.settings.get('behaviour.answerOnlyQuestions');
@@ -198,8 +198,9 @@ class Pipeline extends EventEmitter {
 
       this.emit('answer', answer);
 
-      // To the phone. Falls back to REST if the socket is down so nothing is lost.
-      const ack = await this.socket.sendAnswer({
+      // Straight to Firestore; the phone's listener does the rest. If the write
+      // fails it is queued and retried on the next heartbeat, so nothing is lost.
+      const delivery = await this.sync.sendAnswer({
         question: answer.question,
         answer: answer.answer,
         summary: answer.summary,
@@ -208,21 +209,9 @@ class Pipeline extends EventEmitter {
         model: answer.model,
       });
 
-      if (ack?.queued) {
-        try {
-          await this.api.postAnswer({
-            question: answer.question,
-            answer: answer.answer,
-            summary: answer.summary,
-            transcript: answer.transcript,
-            latencyMs,
-            model: answer.model,
-            meetingId: this.socket.meetingId,
-          });
-          this.log?.info('Answer delivered over REST fallback');
-        } catch (error) {
-          this.log?.warn('Answer is queued locally until the backend is reachable', { error: error.message });
-        }
+      if (delivery?.queued) {
+        this.log?.warn('Answer queued until Firestore is reachable again');
+        this.state.notice = { type: 'warn', message: 'Offline - answers will sync when reconnected' };
       }
 
       return answer;
@@ -255,8 +244,8 @@ class Pipeline extends EventEmitter {
     this.log?.info('Pipeline started');
     this.emitState();
 
-    if (this.socket.connected && !this.socket.meetingId) {
-      this.socket.startMeeting().catch(() => {});
+    if (this.auth.signedIn && !this.sync.meetingId) {
+      this.sync.startMeeting().catch(() => {});
     }
 
     return this.state;
@@ -272,7 +261,7 @@ class Pipeline extends EventEmitter {
     this.state.notice = { type: 'info', message: 'Stopped' };
     this.log?.info('Pipeline stopped');
 
-    if (endMeeting) await this.socket.endMeeting().catch(() => {});
+    if (endMeeting) await this.sync.endMeeting().catch(() => {});
 
     this.emitState();
     return this.state;
@@ -293,13 +282,14 @@ class Pipeline extends EventEmitter {
     this.state.running = this.running;
     this.state.thinking = this.thinking;
     this.state.capture = this.audio.state();
-    this.state.connection = this.socket.status();
+    this.state.connection = this.sync.status();
     this.state.gemini = this.gemini.metrics();
     this.state.speech = this.speech.metrics();
     this.state.auth = {
-      signedIn: this.api.signedIn,
+      signedIn: this.auth.signedIn,
       email: this.settings.get('auth.email'),
       userId: this.settings.get('auth.userId'),
+      configured: this.auth.configured,
     };
     return this.state;
   }

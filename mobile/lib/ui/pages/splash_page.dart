@@ -3,9 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app.dart';
 import '../../core/config.dart';
+import '../../state/auth_controller.dart';
 import '../../state/providers.dart';
 import 'login_page.dart';
-import 'pairing_page.dart';
 
 class SplashPage extends ConsumerStatefulWidget {
   const SplashPage({super.key});
@@ -22,31 +22,24 @@ class _SplashPageState extends ConsumerState<SplashPage> with SingleTickerProvid
     duration: const Duration(milliseconds: 1400),
   )..repeat(reverse: true);
 
+  bool _navigated = false;
+
   @override
   void initState() {
     super.initState();
-    _boot();
+    // Firebase restores the session from disk, so we just wait for its first
+    // auth event rather than doing any network work ourselves.
+    _minimumSplash = Future<void>.delayed(const Duration(milliseconds: 900));
   }
 
-  Future<void> _boot() async {
-    // Restore the session while the logo breathes, but never flash past too fast.
-    final started = DateTime.now();
-    await ref.read(authControllerProvider.notifier).restore();
-    final elapsed = DateTime.now().difference(started);
-    if (elapsed < const Duration(milliseconds: 900)) {
-      await Future<void>.delayed(const Duration(milliseconds: 900) - elapsed);
-    }
+  late final Future<void> _minimumSplash;
 
+  Future<void> _go(bool signedIn) async {
+    if (_navigated) return;
+    _navigated = true;
+    await _minimumSplash;
     if (!mounted) return;
-
-    final auth = ref.read(authControllerProvider);
-    if (!auth.isSignedIn) {
-      Navigator.of(context).pushReplacementNamed(LoginPage.route);
-    } else if (!auth.isPaired) {
-      Navigator.of(context).pushReplacementNamed(PairingPage.route);
-    } else {
-      Navigator.of(context).pushReplacementNamed(HomeShell.route);
-    }
+    Navigator.of(context).pushReplacementNamed(signedIn ? HomeShell.route : LoginPage.route);
   }
 
   @override
@@ -58,6 +51,16 @@ class _SplashPageState extends ConsumerState<SplashPage> with SingleTickerProvid
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+
+    ref.listen(authControllerProvider, (previous, next) {
+      if (next.status != AuthStatus.unknown) _go(next.isSignedIn);
+    });
+
+    // Covers the case where auth resolved before this widget subscribed.
+    final auth = ref.watch(authControllerProvider);
+    if (auth.status != AuthStatus.unknown) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _go(auth.isSignedIn));
+    }
 
     return Scaffold(
       body: Center(
@@ -95,10 +98,7 @@ class _SplashPageState extends ConsumerState<SplashPage> with SingleTickerProvid
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 6),
-            Text(
-              AppConfig.tagline,
-              style: TextStyle(color: scheme.onSurfaceVariant),
-            ),
+            Text(AppConfig.tagline, style: TextStyle(color: scheme.onSurfaceVariant)),
             const SizedBox(height: 34),
             SizedBox(
               width: 26,

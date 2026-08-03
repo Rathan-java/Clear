@@ -15,12 +15,13 @@ dependencies:
   # state
   flutter_riverpod: ^2.5.1
 
-  # realtime + network
-  socket_io_client: ^2.0.3+1
-  http: ^1.2.2
+  # Firebase - the only backend. The desktop writes answers here, this app
+  # listens. The two devices never talk to each other.
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  cloud_firestore: ^5.4.4
 
   # storage
-  flutter_secure_storage: ^9.2.2
   shared_preferences: ^2.3.2
 
   # platform features

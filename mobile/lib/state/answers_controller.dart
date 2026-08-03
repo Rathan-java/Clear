@@ -1,17 +1,17 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/notifications.dart';
 import '../core/storage.dart';
-import '../data/api_client.dart';
+import '../data/firebase_service.dart';
 import '../data/models.dart';
-import '../data/socket_service.dart';
 
 class AnswersState {
   const AnswersState({
     this.answers = const [],
-    this.loading = false,
+    this.loading = true,
     this.loadingMore = false,
     this.error,
     this.hasMore = true,
@@ -46,78 +46,107 @@ class AnswersState {
       );
 }
 
-/// Owns the answer feed: live socket pushes merged with paginated history.
+/// Live answer feed straight off Firestore.
+///
+/// The snapshot listener gives us the whole recent window and keeps it current,
+/// so there is nothing to poll and nothing to reconnect. Older pages are
+/// fetched on demand for infinite scroll.
 class AnswersController extends StateNotifier<AnswersState> {
-  AnswersController({
-    required ApiClient api,
-    required SocketService socket,
-    required Storage storage,
-  })  : _api = api,
+  AnswersController({required FirebaseService firebase, required Storage storage})
+      : _firebase = firebase,
         _storage = storage,
         super(const AnswersState()) {
-    _subscription = socket.answers.listen(_onAnswer);
+    _listen();
   }
 
-  final ApiClient _api;
+  final FirebaseService _firebase;
   final Storage _storage;
-  late final StreamSubscription<Answer> _subscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _subscription;
+  List<Answer> _older = const [];
+  bool _primed = false;
 
-  void _onAnswer(Answer answer) {
-    // The backend replays recent answers on connect; do not duplicate them.
-    if (state.answers.any((existing) => existing.id == answer.id)) return;
+  void _listen() {
+    _subscription?.cancel();
+    _primed = false;
 
-    state = state.copyWith(
-      answers: [answer, ...state.answers],
-      unread: answer.replay ? state.unread : state.unread + 1,
-      clearError: true,
+    _subscription = _firebase.answerChanges().listen(
+      (snapshot) {
+        final live = snapshot.docs.map(Answer.fromDoc).toList();
+
+        // Notify only for answers that arrive after the first load, and never
+        // for documents the local cache is only echoing back.
+        if (_primed) {
+          final fresh = snapshot.docChanges
+              .where((change) => change.type == DocumentChangeType.added && !change.doc.metadata.hasPendingWrites)
+              .map((change) => Answer.fromDoc(change.doc))
+              .where((answer) => answer.answer.isNotEmpty)
+              .toList();
+
+          if (fresh.isNotEmpty) {
+            state = state.copyWith(unread: state.unread + fresh.length);
+            if (_storage.notificationsEnabled) {
+              for (final answer in fresh) {
+                NotificationService.instance.showAnswer(answer);
+              }
+            }
+          }
+        }
+
+        _primed = true;
+
+        // Merge in any older pages already fetched, newest first, de-duplicated.
+        final seen = live.map((a) => a.id).toSet();
+        final merged = [...live, ..._older.where((a) => !seen.contains(a.id))];
+
+        state = state.copyWith(answers: merged, loading: false, clearError: true);
+      },
+      onError: (Object error) {
+        state = state.copyWith(loading: false, error: _describe(error));
+      },
     );
-
-    if (!answer.replay && _storage.notificationsEnabled) {
-      NotificationService.instance.showAnswer(answer);
-    }
   }
 
-  Future<void> load({bool refresh = false}) async {
-    if (state.loading) return;
-    state = state.copyWith(loading: true, clearError: true);
-    try {
-      final answers = await _api.history();
-      state = state.copyWith(
-        answers: answers,
-        loading: false,
-        hasMore: answers.isNotEmpty,
-        unread: refresh ? 0 : state.unread,
-      );
-    } on ApiException catch (error) {
-      state = state.copyWith(loading: false, error: error.message);
+  String _describe(Object error) {
+    final message = error.toString();
+    if (message.contains('permission-denied')) {
+      return 'Firestore rules are blocking this account. Deploy the rules from firebase/firestore.rules.';
     }
+    if (message.contains('unavailable') || message.contains('network')) {
+      return 'No connection to Firebase. Answers will appear once you are back online.';
+    }
+    return 'Could not load answers: $message';
+  }
+
+  /// Firestore's listener is already live; this just clears any error state.
+  Future<void> refresh() async {
+    state = state.copyWith(clearError: true, unread: 0);
+    if (state.answers.isEmpty) _listen();
   }
 
   Future<void> loadMore() async {
     if (state.loadingMore || !state.hasMore || state.answers.isEmpty) return;
     state = state.copyWith(loadingMore: true);
+
     try {
-      final older = await _api.history(before: state.answers.last.createdAt.millisecondsSinceEpoch);
-      final existing = state.answers.map((a) => a.id).toSet();
-      final fresh = older.where((a) => !existing.contains(a.id)).toList();
+      final older = await _firebase.olderAnswers(before: state.answers.last.createdAt);
+      final seen = state.answers.map((a) => a.id).toSet();
+      final fresh = older.where((a) => !seen.contains(a.id)).toList();
+
+      _older = [..._older, ...fresh];
       state = state.copyWith(
         answers: [...state.answers, ...fresh],
         loadingMore: false,
         hasMore: fresh.isNotEmpty,
       );
-    } on ApiException catch (error) {
-      state = state.copyWith(loadingMore: false, error: error.message);
+    } catch (error) {
+      state = state.copyWith(loadingMore: false, error: _describe(error));
     }
   }
 
-  /// Server-side search, with a local fallback so it still works offline.
-  Future<List<Answer>> search(String query) async {
+  /// Search runs locally over the loaded window - no index, no extra reads.
+  List<Answer> search(String query) {
     if (query.trim().isEmpty) return state.answers;
-    try {
-      return await _api.history(search: query, limit: 100);
-    } on ApiException {
-      return state.answers.where((answer) => answer.matches(query)).toList();
-    }
+    return state.answers.where((answer) => answer.matches(query)).toList();
   }
 
   void markRead() {
@@ -126,7 +155,7 @@ class AnswersController extends StateNotifier<AnswersState> {
 
   @override
   void dispose() {
-    _subscription.cancel();
+    _subscription?.cancel();
     super.dispose();
   }
 }

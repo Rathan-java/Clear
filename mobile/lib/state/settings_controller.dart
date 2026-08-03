@@ -7,24 +7,16 @@ class SettingsState {
   const SettingsState({
     required this.themeMode,
     required this.notificationsEnabled,
-    required this.backendUrl,
     required this.deviceId,
   });
 
   final String themeMode; // system | light | dark
   final bool notificationsEnabled;
-  final String backendUrl;
   final String deviceId;
 
-  SettingsState copyWith({
-    String? themeMode,
-    bool? notificationsEnabled,
-    String? backendUrl,
-  }) =>
-      SettingsState(
+  SettingsState copyWith({String? themeMode, bool? notificationsEnabled}) => SettingsState(
         themeMode: themeMode ?? this.themeMode,
         notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
-        backendUrl: backendUrl ?? this.backendUrl,
         deviceId: deviceId,
       );
 }
@@ -34,7 +26,6 @@ class SettingsController extends StateNotifier<SettingsState> {
       : super(SettingsState(
           themeMode: _storage.themeMode,
           notificationsEnabled: _storage.notificationsEnabled,
-          backendUrl: _storage.backendUrl,
           deviceId: _storage.deviceId,
         ));
 
@@ -49,10 +40,5 @@ class SettingsController extends StateNotifier<SettingsState> {
     if (enabled) await NotificationService.instance.requestPermission();
     await _storage.setNotificationsEnabled(enabled);
     state = state.copyWith(notificationsEnabled: enabled);
-  }
-
-  Future<void> setBackendUrl(String url) async {
-    await _storage.setBackendUrl(url);
-    state = state.copyWith(backendUrl: _storage.backendUrl);
   }
 }

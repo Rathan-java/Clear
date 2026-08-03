@@ -1,9 +1,10 @@
+import 'dart:async';
+
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/storage.dart';
-import '../data/api_client.dart';
-import '../data/models.dart';
-import '../data/socket_service.dart';
+import '../data/firebase_service.dart';
 
 enum AuthStatus { unknown, signedOut, signedIn }
 
@@ -11,143 +12,91 @@ class AuthState {
   const AuthState({
     this.status = AuthStatus.unknown,
     this.email,
-    this.userId,
-    this.pairedDesktop,
+    this.uid,
     this.busy = false,
     this.error,
   });
 
   final AuthStatus status;
   final String? email;
-  final String? userId;
-  final String? pairedDesktop;
+  final String? uid;
   final bool busy;
   final String? error;
 
   bool get isSignedIn => status == AuthStatus.signedIn;
-  bool get isPaired => pairedDesktop != null;
 
   AuthState copyWith({
     AuthStatus? status,
     String? email,
-    String? userId,
-    String? pairedDesktop,
+    String? uid,
     bool? busy,
     String? error,
     bool clearError = false,
-    bool clearPaired = false,
   }) =>
       AuthState(
         status: status ?? this.status,
         email: email ?? this.email,
-        userId: userId ?? this.userId,
-        pairedDesktop: clearPaired ? null : (pairedDesktop ?? this.pairedDesktop),
+        uid: uid ?? this.uid,
         busy: busy ?? this.busy,
         error: clearError ? null : (error ?? this.error),
       );
 }
 
+/// Wraps Firebase Auth. There is no pairing step - signing into the same
+/// account as the desktop is what links them.
 class AuthController extends StateNotifier<AuthState> {
-  AuthController({
-    required ApiClient api,
-    required Storage storage,
-    required SocketService socket,
-  })  : _api = api,
+  AuthController({required FirebaseService firebase, required Storage storage})
+      : _firebase = firebase,
         _storage = storage,
-        _socket = socket,
-        super(const AuthState());
+        super(const AuthState()) {
+    _subscription = _firebase.authState.listen(_onAuthChanged);
+  }
 
-  final ApiClient _api;
+  final FirebaseService _firebase;
   final Storage _storage;
-  final SocketService _socket;
+  late final StreamSubscription<User?> _subscription;
 
-  /// Called from the splash screen: silently restores a stored session.
-  Future<void> restore() async {
-    final token = await _storage.readRefreshToken();
-    if (token == null) {
-      state = state.copyWith(status: AuthStatus.signedOut);
+  /// Firebase restores the session from disk on launch, so this fires once at
+  /// startup with the already-signed-in user (or null).
+  void _onAuthChanged(User? user) {
+    if (user == null) {
+      _firebase.stopHeartbeat();
+      state = state.copyWith(status: AuthStatus.signedOut, uid: null);
       return;
     }
 
-    try {
-      await _api.refresh();
-      state = state.copyWith(
-        status: AuthStatus.signedIn,
-        email: _storage.email,
-        userId: _storage.userId,
-        pairedDesktop: _storage.pairedDesktop,
-        clearError: true,
-      );
-      await _socket.connect();
-    } catch (error) {
-      await _storage.clearSession();
-      state = state.copyWith(status: AuthStatus.signedOut, error: null);
-    }
+    _storage.setLastEmail(user.email);
+    _firebase.startHeartbeat();
+    state = state.copyWith(
+      status: AuthStatus.signedIn,
+      email: user.email,
+      uid: user.uid,
+      clearError: true,
+    );
   }
 
-  Future<bool> signIn({required String email, required String password, String? backendUrl}) async {
+  Future<bool> signIn({required String email, required String password}) async {
     state = state.copyWith(busy: true, clearError: true);
     try {
-      if (backendUrl != null && backendUrl.isNotEmpty && backendUrl != _storage.backendUrl) {
-        await _storage.setBackendUrl(backendUrl);
-      }
-
-      final session = await _api.login(email: email, password: password);
-      state = state.copyWith(
-        status: AuthStatus.signedIn,
-        email: session.email,
-        userId: session.userId,
-        pairedDesktop: _storage.pairedDesktop,
-        busy: false,
-        clearError: true,
-      );
-      await _socket.connect();
+      await _firebase.signIn(email: email.trim(), password: password);
+      state = state.copyWith(busy: false, clearError: true);
       return true;
-    } on ApiException catch (error) {
-      state = state.copyWith(busy: false, error: error.message);
-      return false;
     } catch (error) {
-      state = state.copyWith(busy: false, error: 'Something went wrong: $error');
+      state = state.copyWith(busy: false, error: FirebaseService.describeAuthError(error));
       return false;
     }
   }
-
-  Future<String?> pair(String code) async {
-    state = state.copyWith(busy: true, clearError: true);
-    try {
-      final result = await _api.pair(code);
-      final desktopName = (result['desktop']?['name'] ?? 'Windows PC').toString();
-      await _storage.setPairedDesktop(desktopName);
-      state = state.copyWith(busy: false, pairedDesktop: desktopName, clearError: true);
-      await _socket.connect();
-      return null;
-    } on ApiException catch (error) {
-      state = state.copyWith(busy: false, error: error.message);
-      return error.message;
-    }
-  }
-
-  /// Re-checks whether this account already has a desktop linked.
-  Future<void> refreshPairing() async {
-    try {
-      final devices = await _api.devices();
-      final desktop = devices.where((device) => device['platform'] == 'desktop').toList();
-      if (desktop.isEmpty) return;
-      final name = (desktop.first['name'] ?? 'Windows PC').toString();
-      await _storage.setPairedDesktop(name);
-      state = state.copyWith(pairedDesktop: name);
-    } catch (_) {
-      // Not fatal - the dashboard still works without this.
-    }
-  }
-
-  Future<void> reconnect() => _socket.connect();
 
   Future<void> signOut() async {
-    await _socket.disconnect();
-    await _api.logout();
+    await _firebase.signOut();
     state = const AuthState(status: AuthStatus.signedOut);
   }
 
   void clearError() => state = state.copyWith(clearError: true);
+
+  @override
+  void dispose() {
+    _subscription.cancel();
+    super.dispose();
+  }
 }

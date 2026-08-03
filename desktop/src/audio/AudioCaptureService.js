@@ -21,7 +21,7 @@ const { peak, durationMs } = require('./wav');
  *
  * The renderer does the actual Web Audio work (it is the only side with an
  * AudioContext) and streams 16 kHz mono 16-bit PCM back over IPC. Everything
- * downstream - SpeechService, Gemini, sockets - only ever sees Buffers.
+ * downstream - SpeechService, Gemini, Firestore - only ever sees Buffers.
  *
  * Events: 'pcm' (Buffer), 'level' ({level}), 'state' ({...}), 'error' (Error)
  */

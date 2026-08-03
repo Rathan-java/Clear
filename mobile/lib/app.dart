@@ -7,7 +7,6 @@ import 'state/providers.dart';
 import 'ui/pages/dashboard_page.dart';
 import 'ui/pages/history_page.dart';
 import 'ui/pages/login_page.dart';
-import 'ui/pages/pairing_page.dart';
 import 'ui/pages/settings_page.dart';
 import 'ui/pages/splash_page.dart';
 
@@ -26,7 +25,6 @@ class ClearApp extends ConsumerWidget {
       routes: {
         SplashPage.route: (_) => const SplashPage(),
         LoginPage.route: (_) => const LoginPage(),
-        PairingPage.route: (_) => const PairingPage(),
         HomeShell.route: (_) => const HomeShell(),
         HistoryPage.route: (_) => const HistoryPage(),
         SettingsPage.route: (_) => const SettingsPage(),
@@ -49,17 +47,15 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   int _index = 0;
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(answersControllerProvider.notifier).load();
-      ref.read(authControllerProvider.notifier).refreshPairing();
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
     final unread = ref.watch(answersControllerProvider).unread;
+
+    // Signing out from anywhere drops straight back to the login screen.
+    ref.listen(authControllerProvider, (previous, next) {
+      if (previous?.isSignedIn == true && !next.isSignedIn) {
+        Navigator.of(context).pushNamedAndRemoveUntil(LoginPage.route, (route) => false);
+      }
+    });
 
     return Scaffold(
       body: IndexedStack(

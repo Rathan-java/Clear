@@ -1,9 +1,6 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../data/models.dart';
 import '../../state/providers.dart';
 import '../widgets/answer_card.dart';
 import '../widgets/status_banner.dart';
@@ -23,9 +20,6 @@ class HistoryPage extends ConsumerStatefulWidget {
 class _HistoryPageState extends ConsumerState<HistoryPage> {
   final _scrollController = ScrollController();
   final _searchController = TextEditingController();
-  Timer? _debounce;
-  List<Answer>? _results;
-  bool _searching = false;
 
   @override
   void initState() {
@@ -40,40 +34,16 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
 
   @override
   void dispose() {
-    _debounce?.cancel();
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
-  }
-
-  void _onSearchChanged(String value) {
-    ref.read(searchQueryProvider.notifier).state = value;
-    _debounce?.cancel();
-
-    if (value.trim().isEmpty) {
-      setState(() {
-        _results = null;
-        _searching = false;
-      });
-      return;
-    }
-
-    setState(() => _searching = true);
-    _debounce = Timer(const Duration(milliseconds: 350), () async {
-      final results = await ref.read(answersControllerProvider.notifier).search(value);
-      if (!mounted) return;
-      setState(() {
-        _results = results;
-        _searching = false;
-      });
-    });
   }
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(answersControllerProvider);
     final query = ref.watch(searchQueryProvider);
-    final answers = _results ?? state.answers;
+    final answers = ref.read(answersControllerProvider.notifier).search(query);
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -87,7 +57,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
             child: TextField(
               controller: _searchController,
-              onChanged: _onSearchChanged,
+              onChanged: (value) => ref.read(searchQueryProvider.notifier).state = value,
               textInputAction: TextInputAction.search,
               decoration: InputDecoration(
                 hintText: 'Search questions and answers',
@@ -98,7 +68,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
                         icon: const Icon(Icons.clear),
                         onPressed: () {
                           _searchController.clear();
-                          _onSearchChanged('');
+                          ref.read(searchQueryProvider.notifier).state = '';
                         },
                       ),
               ),
@@ -107,11 +77,9 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
 
           if (!widget.embedded) const StatusBanner(),
 
-          if (_searching) const LinearProgressIndicator(minHeight: 2),
-
           Expanded(
             child: RefreshIndicator(
-              onRefresh: () => ref.read(answersControllerProvider.notifier).load(refresh: true),
+              onRefresh: () => ref.read(answersControllerProvider.notifier).refresh(),
               child: answers.isEmpty
                   ? ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
@@ -122,7 +90,7 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
                           title: query.isEmpty ? 'No answers yet' : 'Nothing matched "$query"',
                           body: query.isEmpty
                               ? 'Answers generated during your meetings are kept here.'
-                              : 'Try a different word from the question or the answer.',
+                              : 'Search looks through the answers already loaded. Scroll down to load more.',
                         ),
                       ],
                     )

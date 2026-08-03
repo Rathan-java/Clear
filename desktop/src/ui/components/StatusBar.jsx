@@ -15,7 +15,7 @@ const StatusBar = ({ state, onReconnect, tab, setTab }) => {
 
   const tabs = [
     { id: 'live', label: 'Live' },
-    { id: 'pair', label: 'Pair phone' },
+    { id: 'pair', label: 'Phone' },
     { id: 'settings', label: 'Settings' },
     { id: 'logs', label: 'Logs' },
   ];

@@ -3,8 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/config.dart';
 import '../../state/providers.dart';
-import 'login_page.dart';
-import 'pairing_page.dart';
 
 class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key, this.embedded = false});
@@ -17,7 +15,7 @@ class SettingsPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsControllerProvider);
     final auth = ref.watch(authControllerProvider);
-    final connection = ref.watch(connectionStatusProvider);
+    final presence = ref.watch(presenceProvider);
     final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
@@ -34,14 +32,42 @@ class SettingsPage extends ConsumerWidget {
               ListTile(
                 leading: const Icon(Icons.person_outline),
                 title: Text(auth.email ?? 'Not signed in'),
-                subtitle: Text(auth.isPaired ? 'Paired with ${auth.pairedDesktop}' : 'No desktop paired yet'),
+                subtitle: const Text('Signing in with this account on the desktop is what links them'),
               ),
-              ListTile(
-                leading: const Icon(Icons.link),
-                title: const Text('Pair with a desktop'),
-                subtitle: const Text('Enter a new pairing code'),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => Navigator.of(context).pushNamed(PairingPage.route),
+            ],
+          ),
+
+          _Section(
+            title: 'Desktop',
+            children: [
+              presence.when(
+                data: (data) => ListTile(
+                  leading: Icon(
+                    data.desktopOnline ? Icons.desktop_windows : Icons.desktop_access_disabled_outlined,
+                    color: data.desktopOnline ? const Color(0xFF34D399) : scheme.onSurfaceVariant,
+                  ),
+                  title: Text(data.desktopOnline ? (data.desktopName ?? 'Desktop') : 'No desktop online'),
+                  subtitle: Text(
+                    data.desktopListening
+                        ? 'Listening to your meeting now'
+                        : data.desktopOnline
+                            ? 'Running, but not listening'
+                            : 'Open Clear on your PC and sign in with the same account',
+                  ),
+                ),
+                loading: () => const ListTile(
+                  leading: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  title: Text('Checking…'),
+                ),
+                error: (error, _) => ListTile(
+                  leading: Icon(Icons.error_outline, color: scheme.error),
+                  title: const Text('Cannot reach Firebase'),
+                  subtitle: Text('$error', maxLines: 2, overflow: TextOverflow.ellipsis),
+                ),
               ),
             ],
           ),
@@ -87,43 +113,17 @@ class SettingsPage extends ConsumerWidget {
           ),
 
           _Section(
-            title: 'Connection',
-            children: [
-              ListTile(
-                leading: Icon(
-                  connection.connected ? Icons.cloud_done_outlined : Icons.cloud_off_outlined,
-                  color: connection.connected ? const Color(0xFF34D399) : scheme.error,
-                ),
-                title: Text(connection.connected ? 'Connected' : 'Not connected'),
-                subtitle: Text(
-                  connection.latencyMs != null
-                      ? '${settings.backendUrl}  ·  ${connection.latencyMs} ms'
-                      : settings.backendUrl,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: TextButton(
-                  onPressed: () => ref.read(authControllerProvider.notifier).reconnect(),
-                  child: const Text('Reconnect'),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.dns_outlined),
-                title: const Text('Backend URL'),
-                subtitle: Text(settings.backendUrl),
-                trailing: const Icon(Icons.edit_outlined, size: 20),
-                onTap: () => _editBackendUrl(context, ref, settings.backendUrl),
-              ),
-            ],
-          ),
-
-          _Section(
             title: 'About',
             children: [
               const ListTile(
                 leading: Icon(Icons.info_outline),
                 title: Text('${AppConfig.appName} for Android'),
-                subtitle: Text('Version 1.0.0'),
+                subtitle: Text('Version ${AppConfig.version}'),
+              ),
+              const ListTile(
+                leading: Icon(Icons.cloud_outlined),
+                title: Text('Answers arrive through Firebase'),
+                subtitle: Text('This phone never connects to your PC directly'),
               ),
               ListTile(
                 leading: const Icon(Icons.smartphone),
@@ -140,18 +140,15 @@ class SettingsPage extends ConsumerWidget {
                 context: context,
                 builder: (context) => AlertDialog(
                   title: const Text('Sign out?'),
-                  content: const Text('You will need to sign in and pair again on this phone.'),
+                  content: const Text('You will need to sign in again to see new answers.'),
                   actions: [
                     TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
                     FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Sign out')),
                   ],
                 ),
               );
-              if (confirmed != true || !context.mounted) return;
-
+              if (confirmed != true) return;
               await ref.read(authControllerProvider.notifier).signOut();
-              if (!context.mounted) return;
-              Navigator.of(context).pushNamedAndRemoveUntil(LoginPage.route, (route) => false);
             },
             style: OutlinedButton.styleFrom(foregroundColor: scheme.error),
             icon: const Icon(Icons.logout),
@@ -160,30 +157,6 @@ class SettingsPage extends ConsumerWidget {
         ],
       ),
     );
-  }
-
-  Future<void> _editBackendUrl(BuildContext context, WidgetRef ref, String current) async {
-    final controller = TextEditingController(text: current);
-    final value = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Backend URL'),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.url,
-          autocorrect: false,
-          decoration: const InputDecoration(hintText: 'https://your-backend.onrender.com'),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, controller.text.trim()), child: const Text('Save')),
-        ],
-      ),
-    );
-
-    if (value == null || value.isEmpty) return;
-    await ref.read(settingsControllerProvider.notifier).setBackendUrl(value);
-    await ref.read(authControllerProvider.notifier).reconnect();
   }
 }
 

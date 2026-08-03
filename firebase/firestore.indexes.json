@@ -1,0 +1,10 @@
+{
+  "comment": [
+    "Single-field indexes are created automatically by Firestore, and every query",
+    "Clear runs is a single orderBy('createdAt') inside one user's subcollection.",
+    "So there are no composite indexes to deploy - this file exists to keep",
+    "`firebase deploy --only firestore` happy and to document that fact."
+  ],
+  "indexes": [],
+  "fieldOverrides": []
+}

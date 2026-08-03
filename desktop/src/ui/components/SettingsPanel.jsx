@@ -3,7 +3,8 @@ import { Button, Card, Field, Pill, Toggle } from './ui.jsx';
 
 const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, onSelectDevice, onLogout, onOpenLogs }) => {
   const [apiKey, setApiKey] = useState('');
-  const [backendUrl, setBackendUrl] = useState(settings.backendUrl || '');
+  const [firebaseKey, setFirebaseKey] = useState(settings.firebase?.apiKey || '');
+  const [projectId, setProjectId] = useState(settings.firebase?.projectId || '');
   const [test, setTest] = useState(null);
   const [testing, setTesting] = useState(false);
 
@@ -190,21 +191,34 @@ const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, 
         />
       </Card>
 
-      <Card title="Account & backend">
-        <div className="settings__row">
-          <Field label="Backend URL">
-            <input value={backendUrl} onChange={(event) => setBackendUrl(event.target.value)} />
+      <Card title="Account & Firebase" subtitle="Where answers are published for your phone to pick up">
+        <div className="settings__grid">
+          <Field label="Firebase API key">
+            <input
+              value={firebaseKey}
+              onChange={(event) => setFirebaseKey(event.target.value)}
+              spellCheck={false}
+              placeholder="AIzaSy…"
+            />
           </Field>
-          <div className="settings__row-actions">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onPatch({ backendUrl: backendUrl.replace(/\/+$/, '') })}
-              disabled={backendUrl === settings.backendUrl}
-            >
-              Save & reconnect
-            </Button>
-          </div>
+          <Field label="Firebase project ID">
+            <input
+              value={projectId}
+              onChange={(event) => setProjectId(event.target.value)}
+              spellCheck={false}
+              placeholder="your-project-id"
+            />
+          </Field>
+        </div>
+        <div className="settings__row-actions">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onPatch({ firebase: { apiKey: firebaseKey.trim(), projectId: projectId.trim() } })}
+            disabled={firebaseKey === settings.firebase?.apiKey && projectId === settings.firebase?.projectId}
+          >
+            Save & reconnect
+          </Button>
         </div>
 
         <dl className="facts">

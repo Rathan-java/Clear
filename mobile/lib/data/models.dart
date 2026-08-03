@@ -1,6 +1,15 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
-/// One AI answer, exactly as the backend stores and broadcasts it.
+DateTime _readTime(dynamic value) {
+  if (value is Timestamp) return value.toDate();
+  if (value is DateTime) return value;
+  if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  return DateTime.now();
+}
+
+/// One AI answer, exactly as the desktop writes it to Firestore.
 class Answer {
   const Answer({
     required this.id,
@@ -12,7 +21,6 @@ class Answer {
     this.latencyMs,
     this.model,
     this.meetingId,
-    this.replay = false,
   });
 
   final String id;
@@ -24,37 +32,21 @@ class Answer {
   final int? latencyMs;
   final String? model;
   final String? meetingId;
-  final bool replay;
 
-  factory Answer.fromJson(Map<String, dynamic> json) {
-    final createdMs = json['createdAtMs'];
-    return Answer(
-      id: (json['id'] ?? '${DateTime.now().microsecondsSinceEpoch}').toString(),
-      question: (json['question'] ?? '').toString(),
-      answer: (json['answer'] ?? '').toString(),
-      summary: (json['summary'] as List?)?.map((e) => e.toString()).toList() ?? const [],
-      createdAt: createdMs is num
-          ? DateTime.fromMillisecondsSinceEpoch(createdMs.toInt())
-          : DateTime.tryParse((json['createdAt'] ?? '').toString()) ?? DateTime.now(),
-      transcript: (json['transcript'] ?? '').toString(),
-      latencyMs: (json['latencyMs'] as num?)?.toInt(),
-      model: json['model']?.toString(),
-      meetingId: json['meetingId']?.toString(),
-      replay: json['replay'] == true,
-    );
-  }
+  factory Answer.fromMap(String id, Map<String, dynamic> data) => Answer(
+        id: id,
+        question: (data['question'] ?? '').toString(),
+        answer: (data['answer'] ?? '').toString(),
+        summary: (data['summary'] as List?)?.map((e) => e.toString()).toList() ?? const [],
+        createdAt: _readTime(data['createdAt']),
+        transcript: (data['transcript'] ?? '').toString(),
+        latencyMs: (data['latencyMs'] as num?)?.toInt(),
+        model: data['model']?.toString(),
+        meetingId: data['meetingId']?.toString(),
+      );
 
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'question': question,
-        'answer': answer,
-        'summary': summary,
-        'createdAtMs': createdAt.millisecondsSinceEpoch,
-        'transcript': transcript,
-        'latencyMs': latencyMs,
-        'model': model,
-        'meetingId': meetingId,
-      };
+  factory Answer.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>
+      Answer.fromMap(doc.id, doc.data() ?? const {});
 
   String get title => question.isNotEmpty ? question : answer;
 
@@ -86,7 +78,7 @@ class Answer {
   }
 }
 
-/// A live transcript line pushed from the desktop.
+/// A transcript line, when the desktop is set to publish them.
 class TranscriptLine {
   const TranscriptLine({
     required this.id,
@@ -100,71 +92,64 @@ class TranscriptLine {
   final bool isQuestion;
   final DateTime at;
 
-  factory TranscriptLine.fromJson(Map<String, dynamic> json) => TranscriptLine(
-        id: (json['id'] ?? '${DateTime.now().microsecondsSinceEpoch}').toString(),
-        text: (json['text'] ?? '').toString(),
-        isQuestion: json['isQuestion'] == true,
-        at: DateTime.tryParse((json['createdAt'] ?? json['endedAt'] ?? '').toString()) ?? DateTime.now(),
-      );
+  factory TranscriptLine.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? const {};
+    return TranscriptLine(
+      id: doc.id,
+      text: (data['text'] ?? '').toString(),
+      isQuestion: data['isQuestion'] == true,
+      at: _readTime(data['createdAt']),
+    );
+  }
 }
 
-/// Who is in the room right now, from the server's point of view.
+/// A device signed into this account, from users/{uid}/devices.
+class DeviceInfo {
+  const DeviceInfo({
+    required this.id,
+    required this.platform,
+    required this.name,
+    required this.lastSeenAt,
+    this.listening = false,
+  });
+
+  final String id;
+  final String platform;
+  final String name;
+  final DateTime lastSeenAt;
+  final bool listening;
+
+  factory DeviceInfo.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final data = doc.data() ?? const {};
+    return DeviceInfo(
+      id: doc.id,
+      platform: (data['platform'] ?? 'unknown').toString(),
+      name: (data['name'] ?? 'Device').toString(),
+      lastSeenAt: _readTime(data['lastSeenAt']),
+      listening: data['listening'] == true,
+    );
+  }
+
+  /// The desktop heartbeats every 30s; allow three misses before calling it gone.
+  bool get isOnline => DateTime.now().difference(lastSeenAt).inSeconds < 95;
+}
+
+/// Presence derived from the device documents.
 class Presence {
   const Presence({this.desktops = const [], this.mobiles = const []});
 
-  final List<String> desktops;
-  final List<String> mobiles;
+  final List<DeviceInfo> desktops;
+  final List<DeviceInfo> mobiles;
 
-  factory Presence.fromJson(Map<String, dynamic>? json) {
-    List<String> names(dynamic list) =>
-        (list as List?)?.map((e) => (e is Map ? (e['name'] ?? e['deviceId'] ?? 'device') : e).toString()).toList() ??
-        const [];
+  factory Presence.fromDevices(List<DeviceInfo> devices) {
+    final online = devices.where((device) => device.isOnline).toList();
     return Presence(
-      desktops: names(json?['desktop']),
-      mobiles: names(json?['mobile']),
+      desktops: online.where((d) => d.platform == 'desktop').toList(),
+      mobiles: online.where((d) => d.platform == 'mobile').toList(),
     );
   }
 
   bool get desktopOnline => desktops.isNotEmpty;
-}
-
-class UserSession {
-  const UserSession({
-    required this.userId,
-    required this.email,
-    required this.accessToken,
-    required this.refreshToken,
-  });
-
-  final String userId;
-  final String email;
-  final String accessToken;
-  final String refreshToken;
-
-  factory UserSession.fromJson(Map<String, dynamic> json) => UserSession(
-        userId: (json['user']?['id'] ?? '').toString(),
-        email: (json['user']?['email'] ?? '').toString(),
-        accessToken: (json['accessToken'] ?? '').toString(),
-        refreshToken: (json['refreshToken'] ?? '').toString(),
-      );
-
-  UserSession copyWith({String? accessToken, String? refreshToken}) => UserSession(
-        userId: userId,
-        email: email,
-        accessToken: accessToken ?? this.accessToken,
-        refreshToken: refreshToken ?? this.refreshToken,
-      );
-}
-
-class ApiException implements Exception {
-  ApiException(this.message, {this.statusCode, this.code});
-
-  final String message;
-  final int? statusCode;
-  final String? code;
-
-  bool get isAuthError => statusCode == 401;
-
-  @override
-  String toString() => message;
+  bool get desktopListening => desktops.any((d) => d.listening);
+  String? get desktopName => desktops.isEmpty ? null : desktops.first.name;
 }

@@ -3,7 +3,7 @@ import installCaptureBridge from './capture/captureBridge.js';
 import StatusBar from './components/StatusBar.jsx';
 import LoginView from './components/LoginView.jsx';
 import LivePanel from './components/LivePanel.jsx';
-import PairPanel from './components/PairPanel.jsx';
+import PhonePanel from './components/PhonePanel.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import LogsPanel from './components/LogsPanel.jsx';
 
@@ -103,7 +103,6 @@ const App = () => {
           : { tone: 'error', message: result.error }
       );
     },
-    onCreateCode: () => api.invoke('pair:code'),
     onTestGemini: () => api.invoke('gemini:test'),
     onLogout: async () => {
       await api.invoke('auth:logout');
@@ -127,7 +126,6 @@ const App = () => {
       <div className="app app--login">
         <LoginView
           settings={settings}
-          onPatchSettings={patchSettings}
           onLogin={async (credentials) => {
             const result = await api.invoke('auth:login', credentials);
             if (result.ok) {
@@ -159,7 +157,7 @@ const App = () => {
           />
         )}
 
-        {tab === 'pair' && <PairPanel state={state} onCreateCode={handlers.onCreateCode} />}
+        {tab === 'pair' && <PhonePanel state={state} />}
 
         {tab === 'settings' && (
           <SettingsPanel
