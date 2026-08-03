@@ -134,9 +134,9 @@ const LivePanel = ({ state, devices, onToggle, onClear, onAsk, onSelectDevice, o
             }
             className="live__answer"
           >
-            {state.thinking && (
+            {state.thinking && !answer?.answer && (
               <div className="thinking">
-                <span className="spinner" /> Generating answer…
+                <span className="spinner" /> Listening for the answer…
               </div>
             )}
 
@@ -146,9 +146,9 @@ const LivePanel = ({ state, devices, onToggle, onClear, onAsk, onSelectDevice, o
               </Empty>
             )}
 
-            {answer && !state.thinking && (
+            {answer?.answer && (
               <>
-                <p className="answer__text">{answer.answer}</p>
+                <p className={`answer__text${answer.streaming ? ' is-streaming' : ''}`}>{answer.answer}</p>
                 {answer.summary?.length > 0 && (
                   <ul className="answer__summary">
                     {answer.summary.map((point, index) => (
@@ -157,8 +157,19 @@ const LivePanel = ({ state, devices, onToggle, onClear, onAsk, onSelectDevice, o
                   </ul>
                 )}
                 <div className="answer__meta">
-                  <Pill tone="good">{answer.latencyMs} ms</Pill>
-                  <Pill tone="neutral">{relativeTime(answer.at)}</Pill>
+                  {answer.streaming ? (
+                    <Pill tone="warn">writing…</Pill>
+                  ) : (
+                    <>
+                      {answer.firstTokenMs != null && (
+                        <Pill tone="good" title="Time until the first words appeared">
+                          {answer.firstTokenMs} ms to first word
+                        </Pill>
+                      )}
+                      <Pill tone="neutral">{answer.latencyMs} ms total</Pill>
+                      <Pill tone="neutral">{relativeTime(answer.at)}</Pill>
+                    </>
+                  )}
                   {answer.manual && <Pill tone="neutral">manual</Pill>}
                 </div>
               </>
@@ -181,8 +192,8 @@ const LivePanel = ({ state, devices, onToggle, onClear, onAsk, onSelectDevice, o
       <div className="metrics">
         <Metric label="Answers" value={stats.answers || 0} />
         <Metric label="Questions" value={stats.questions || 0} />
+        <Metric label="First word" value={stats.lastFirstTokenMs ? `${stats.lastFirstTokenMs} ms` : '—'} />
         <Metric label="Avg answer" value={stats.avgAnswerMs ? `${stats.avgAnswerMs} ms` : '—'} />
-        <Metric label="Last answer" value={stats.lastAnswerMs ? `${stats.lastAnswerMs} ms` : '—'} />
         <Metric label="Cloud write" value={state.connection?.latencyMs != null ? `${state.connection.latencyMs} ms` : '—'} />
         <Metric label="Audio captured" value={`${Math.round((capture.capturedMs || 0) / 1000)}s`} />
         <Metric label="Errors" value={stats.errors || 0} tone={stats.errors ? 'bad' : undefined} />

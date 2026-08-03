@@ -2,16 +2,19 @@
 
 const { buildAnswerPrompt, buildTranscriptionPrompt } = require('./prompts');
 const { ProviderError } = require('./GeminiProvider');
+const { readSse } = require('./sse');
 
 const BASE = 'https://api.openai.com/v1';
 
+const SYSTEM = 'You follow the requested reply format exactly. Never wrap your reply in markdown fences.';
+
 /**
- * OpenAI. Two different endpoints do the two jobs:
- *   answers      /chat/completions with response_format json_object
+ * OpenAI. Two endpoints do the two jobs:
+ *   answers       /chat/completions (streams)
  *   transcription /audio/transcriptions (Whisper), multipart upload
  *
- * Unlike Gemini it cannot read a PDF directly, so CV uploads fall back to the
- * local pdf/docx parsers - see ProfileStore.
+ * Chat cannot take raw audio, so the single-call fast path is Gemini-only;
+ * AiService falls back to transcribe-then-answer here automatically.
  */
 class OpenAIProvider {
   static id = 'openai';
@@ -25,12 +28,16 @@ class OpenAIProvider {
     { id: 'gpt-4.1', label: 'gpt-4.1' },
   ];
   static transcribeModels = [
+    { id: 'gpt-4o-mini-transcribe', label: 'gpt-4o-mini-transcribe (fastest)' },
     { id: 'whisper-1', label: 'whisper-1 (reliable)' },
-    { id: 'gpt-4o-mini-transcribe', label: 'gpt-4o-mini-transcribe (faster)' },
     { id: 'gpt-4o-transcribe', label: 'gpt-4o-transcribe (most accurate)' },
   ];
 
   static get canReadDocuments() {
+    return false;
+  }
+
+  static get canAnswerFromAudio() {
     return false;
   }
 
@@ -44,21 +51,22 @@ class OpenAIProvider {
     return Boolean(this.getApiKey());
   }
 
-  async request(path, { body, formData, timeoutMs = 45000, attempt = 0 } = {}) {
+  requireKey() {
     const apiKey = this.getApiKey();
     if (!apiKey) throw new ProviderError('No OpenAI API key configured', { retryable: false });
+    return apiKey;
+  }
 
+  async request(path, { body, timeoutMs = 45000, attempt = 0 } = {}) {
+    const apiKey = this.requireKey();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${BASE}${path}`, {
         method: 'POST',
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          ...(formData ? {} : { 'content-type': 'application/json' }),
-        },
-        body: formData || JSON.stringify(body),
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -69,7 +77,7 @@ class OpenAIProvider {
         if (retryable && attempt < 2) {
           clearTimeout(timer);
           await new Promise((resolve) => setTimeout(resolve, 700 * 2 ** attempt));
-          return this.request(path, { body, formData, timeoutMs, attempt: attempt + 1 });
+          return this.request(path, { body, timeoutMs, attempt: attempt + 1 });
         }
 
         let message = `OpenAI returned ${response.status}`;
@@ -93,34 +101,75 @@ class OpenAIProvider {
     }
   }
 
-  async generateAnswer(transcript, { context = '', style, mode, profile } = {}) {
+  async stream(body, { timeoutMs = 45000, onPartial } = {}) {
+    const apiKey = this.requireKey();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(`${BASE}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ ...body, stream: true }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        let message = `OpenAI returned ${response.status}`;
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed?.error?.message) message = parsed.error.message;
+        } catch {
+          /* keep the status-code message */
+        }
+        throw new ProviderError(message, { status: response.status });
+      }
+
+      let full = '';
+      await readSse(response, (event) => {
+        const delta = event?.choices?.[0]?.delta?.content;
+        if (!delta) return;
+        full += delta;
+        onPartial?.(full, delta);
+      });
+
+      return full;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new ProviderError('OpenAI timed out', { retryable: true });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async generateAnswer(transcript, { context = '', style, mode, profile, onPartial } = {}) {
     const config = this.getConfig();
     const model = config.model || 'gpt-4o-mini';
     const { prompt, maxOutputTokens } = buildAnswerPrompt({ transcript, context, style, mode, profile });
 
-    const response = await this.request('/chat/completions', {
-      body: {
-        model,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You return only valid JSON matching the requested shape. Never wrap it in markdown fences.',
-          },
-          { role: 'user', content: prompt },
-        ],
-        temperature: config.temperature ?? 0.3,
-        max_tokens: maxOutputTokens,
-        response_format: { type: 'json_object' },
-      },
-    });
+    const body = {
+      model,
+      messages: [
+        { role: 'system', content: SYSTEM },
+        { role: 'user', content: prompt },
+      ],
+      temperature: config.temperature ?? 0.3,
+      max_tokens: maxOutputTokens,
+    };
 
+    if (onPartial) return { text: await this.stream(body, { onPartial }), model };
+
+    const response = await this.request('/chat/completions', { body });
     return { text: response?.choices?.[0]?.message?.content || '', model };
   }
 
   async transcribeAudio(buffer, { mimeType = 'audio/wav', hint = '' } = {}) {
     const config = this.getConfig();
-    const model = config.transcribeModel || 'whisper-1';
+    const model = config.transcribeModel || 'gpt-4o-mini-transcribe';
+    const apiKey = this.requireKey();
 
     // Node 18+/Electron give us FormData and Blob natively.
     const form = new FormData();
@@ -128,9 +177,6 @@ class OpenAIProvider {
     form.append('model', model);
     form.append('response_format', 'text');
     if (hint) form.append('prompt', buildTranscriptionPrompt(hint).slice(0, 800));
-
-    const apiKey = this.getApiKey();
-    if (!apiKey) throw new ProviderError('No OpenAI API key configured', { retryable: false });
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
@@ -145,23 +191,21 @@ class OpenAIProvider {
 
       const text = await response.text();
       if (!response.ok) {
-        throw new ProviderError(`Whisper returned ${response.status}`, {
+        throw new ProviderError(`Transcription returned ${response.status}`, {
           status: response.status,
           retryable: response.status === 429 || response.status >= 500,
           body: text.slice(0, 300),
         });
       }
-      // response_format=text returns the transcript as the raw body.
       return text.trim();
     } catch (error) {
-      if (error.name === 'AbortError') throw new ProviderError('Whisper timed out', { retryable: true });
+      if (error.name === 'AbortError') throw new ProviderError('Transcription timed out', { retryable: true });
       throw error;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** OpenAI chat cannot take a raw PDF; ProfileStore parses locally instead. */
   async extractDocumentText() {
     throw new ProviderError(
       'OpenAI cannot read PDFs directly. Upload a .txt or .docx CV, or paste the text in.',

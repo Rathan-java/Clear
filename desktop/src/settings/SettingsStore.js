@@ -24,6 +24,10 @@ const DEFAULTS = {
     provider: 'gemini', // gemini | openai
     mode: 'meeting', // meeting | interview
     answerStyle: 'balanced', // brief | balanced | detailed
+    // One round trip instead of two: the audio goes straight to the answer
+    // model. Roughly halves latency, at one model call per spoken segment.
+    fastMode: true,
+    streaming: true,
     gemini: {
       model: 'gemini-2.5-flash',
       transcribeModel: 'gemini-2.5-flash',
@@ -41,7 +45,10 @@ const DEFAULTS = {
     deviceLabel: 'System audio (default playback device)',
     ffmpegDevice: '',
     sampleRate: 16000,
-    silenceMs: 900,
+    // Every millisecond here is dead air before the model even starts. 600 ms
+    // is short enough to feel immediate and long enough to survive the pause
+    // in the middle of a sentence.
+    silenceMs: 600,
     minSpeechMs: 600,
     maxSegmentMs: 14000,
     vadSensitivity: 0.55, // 0..1, higher = picks up quieter speech
@@ -54,6 +61,8 @@ const DEFAULTS = {
     autoLaunch: false,
     sendTranscriptToCloud: true,
     notifyOnAnswer: true,
+    // Push the answer to the phone while it is still being written.
+    streamToPhone: true,
   },
   ui: {
     theme: 'dark',

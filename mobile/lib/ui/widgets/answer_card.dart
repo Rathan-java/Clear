@@ -91,6 +91,24 @@ class _AnswerCardState extends State<AnswerCard> {
                 style: const TextStyle(fontSize: 15.5, height: 1.5),
               ),
 
+              if (answer.streaming) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 1.8, color: scheme.primary),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'still writing…',
+                      style: TextStyle(fontSize: 12, color: scheme.primary, fontStyle: FontStyle.italic),
+                    ),
+                  ],
+                ),
+              ],
+
               if (answer.summary.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 ...answer.summary.map(

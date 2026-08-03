@@ -21,6 +21,7 @@ class Answer {
     this.latencyMs,
     this.model,
     this.meetingId,
+    this.streaming = false,
   });
 
   final String id;
@@ -33,6 +34,11 @@ class Answer {
   final String? model;
   final String? meetingId;
 
+  /// True while the desktop is still writing this answer. The document is
+  /// created as soon as the first words exist and patched as it grows, so the
+  /// answer fills in live rather than appearing all at once.
+  final bool streaming;
+
   factory Answer.fromMap(String id, Map<String, dynamic> data) => Answer(
         id: id,
         question: (data['question'] ?? '').toString(),
@@ -43,6 +49,7 @@ class Answer {
         latencyMs: (data['latencyMs'] as num?)?.toInt(),
         model: data['model']?.toString(),
         meetingId: data['meetingId']?.toString(),
+        streaming: data['streaming'] == true,
       );
 
   factory Answer.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) =>

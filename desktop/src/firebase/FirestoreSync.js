@@ -249,8 +249,34 @@ class FirestoreSync extends EventEmitter {
       model: payload.model || null,
       meetingId: payload.meetingId || this.meetingId || null,
       deviceId: this.settings.get('device.id'),
+      streaming: Boolean(payload.streaming),
       createdAt: new Date(),
     });
+  }
+
+  /**
+   * Patches an answer that is still being written, so the phone's listener
+   * sees it grow instead of waiting for the last token.
+   */
+  async updateAnswer(documentId, payload) {
+    if (!documentId || !this.auth.signedIn) return { queued: true };
+
+    try {
+      await this.db.set(`${this.userPath}/answers/${documentId}`, {
+        question: payload.question || '',
+        answer: payload.answer || '',
+        summary: Array.isArray(payload.summary) ? payload.summary.map(String) : [],
+        ...(payload.latencyMs !== undefined ? { latencyMs: payload.latencyMs } : {}),
+        streaming: Boolean(payload.streaming),
+        updatedAt: new Date(),
+      });
+      return { id: documentId };
+    } catch (error) {
+      // A dropped partial is not worth queueing - the final write carries the
+      // whole answer anyway.
+      this.log?.debug('Streaming update dropped', { error: error.message });
+      return { queued: true, error: error.message };
+    }
   }
 
   sendTranscript(payload) {

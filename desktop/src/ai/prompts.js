@@ -3,114 +3,121 @@
 /**
  * Every prompt the app sends, in one place, so the two providers stay honest
  * about producing the same shape of answer.
+ *
+ * Output is a line-delimited format rather than JSON. Two reasons: it streams
+ * (you can show the answer while it is still being written, which JSON cannot
+ * do without a tolerant incremental parser), and it costs fewer tokens, which
+ * is fewer milliseconds.
  */
 
-/** How long the spoken answer should be. */
 const STYLES = {
   brief: {
     label: 'Brief',
-    instruction: '1-2 sentences, under 45 words. Just the direct answer.',
-    summary: '2-3 bullet points, each under 12 words',
-    maxOutputTokens: 400,
+    instruction: 'Two or three sentences. Just the answer, no wind-up.',
+    points: '2 short talking points',
+    maxOutputTokens: 350,
   },
   balanced: {
     label: 'Balanced',
-    instruction: '3-5 sentences, 60-110 words. The answer plus the key reason behind it.',
-    summary: '3-4 bullet points, each under 15 words',
-    maxOutputTokens: 800,
+    instruction: 'Four to six sentences. The answer, then the reason behind it.',
+    points: '3 short talking points',
+    maxOutputTokens: 700,
   },
   detailed: {
     label: 'Detailed',
     instruction:
-      '6-10 sentences, 150-250 words. Cover the answer, the reasoning, a concrete example, ' +
-      'and any important caveat. Written to be spoken out loud, not read.',
-    summary: '4-6 bullet points, each under 18 words',
-    maxOutputTokens: 1600,
+      'Eight to twelve sentences. The answer, why, a concrete example, and any caveat worth saying out loud.',
+    points: '4 to 5 short talking points',
+    maxOutputTokens: 1400,
   },
 };
 
 const DEFAULT_STYLE = 'balanced';
-
 const styleOf = (name) => STYLES[name] || STYLES[DEFAULT_STYLE];
 
-/** The JSON contract. Both providers must return exactly this. */
-const ANSWER_SCHEMA = {
-  type: 'object',
-  properties: {
-    question: { type: 'string' },
-    answer: { type: 'string' },
-    summary: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['question', 'answer', 'summary'],
-};
+/**
+ * The single most important part of these prompts.
+ *
+ * Models default to written register - long balanced clauses, "utilize",
+ * "furthermore", perfectly parallel lists. Read aloud, that sounds like
+ * someone reading. Speech is shorter, messier, and uses contractions.
+ */
+const SPOKEN_RULES = `How it must sound:
+- This will be READ ALOUD. It has to sound like you thought of it just now, not like you are reading.
+- Short sentences. Vary the length. A very short one now and then.
+- Use contractions everywhere: I've, we're, didn't, it's, that's, there's.
+- Say numbers the way people say them out loud: "about forty percent", "a couple of months", "roughly ten thousand".
+- Never use these words: utilize, leverage, furthermore, moreover, additionally, delve, robust, seamless, holistic, myriad, plethora, facilitate, endeavor, paramount.
+- No semicolons. No em dashes. No parentheses. No bullet characters, numbering or markdown inside the answer.
+- No lists inside the answer. If there are two things to say, say "there's two things here" and then say them in sentences.
+- Do not repeat the question back before answering. Start with the answer.
+- Do not open with "Great question", "Certainly", "Absolutely" or "As an AI".
+- Every sentence must be speakable in one breath.`;
 
-const SHARED_RULES = `
-Rules:
-- "question" must be the exact question that was asked, rephrased only enough to stand alone. If the transcript contains no question, return an empty string for "question".
-- "answer" must be something you can say out loud immediately. No preamble, no "great question", no markdown headings, no bullet characters inside the answer text.
-- "summary" is the supporting bullet points, as separate array entries.
-- If you do not know something, say so plainly rather than inventing facts.
-- Return JSON only.`;
+const FORMAT_RULES = `Reply in exactly this format and nothing else:
 
-const MEETING_PROMPT = `You are an AI meeting assistant.
+QUESTION: <the question that was asked, or NONE if nobody asked one>
+ANSWER: <the spoken answer, plain sentences, can run over several lines>
+POINT: <a short talking point>
+POINT: <another one>`;
 
-Given the meeting transcript:
+const MEETING_PROMPT = `You are helping someone in a live meeting. They will read your answer out loud.
+
+Here is what was just said:
 
 {{transcript}}
 
-Tasks:
+Work out whether a question was asked. If one was, answer it: {{styleInstruction}}
+Then give {{pointsInstruction}}.
 
-1. Detect whether this is a question.
-2. Generate an answer: {{styleInstruction}}
-3. Generate {{summaryInstruction}}.
-4. Return JSON.
+${SPOKEN_RULES}
+- Be straight about uncertainty. "I'm not sure, but I think..." is fine. Inventing a fact is not.
 
-Return:
+${FORMAT_RULES}`;
 
-{
-  "question": "",
-  "answer": "",
-  "summary": []
-}
-{{sharedRules}}`;
-
-/**
- * Interview mode. The answer is spoken by the candidate, in first person, and
- * has to be grounded in what is actually on their CV - a plausible-sounding
- * answer that invents experience is worse than useless in an interview.
- */
-const INTERVIEW_PROMPT = `You are helping a candidate answer questions in a live job interview.
+const INTERVIEW_PROMPT = `You are helping a candidate in a live job interview. They will read your answer out loud, as their own answer.
 
 {{profile}}
 
-Given what the interviewer just said:
+Here is what the interviewer just said:
 
 {{transcript}}
 
-Tasks:
+Work out whether they asked a question. Treat "tell me about...", "walk me through...", and "describe a time when..." as questions.
+Write the candidate's spoken answer: {{styleInstruction}}
+Then give {{pointsInstruction}}.
 
-1. Detect whether the interviewer asked a question. Treat "tell me about...", "walk me through...", and "describe a time when..." as questions.
-2. Write the candidate's spoken answer: {{styleInstruction}}
-3. Generate {{summaryInstruction}} - the talking points behind the answer.
-4. Return JSON.
-
-Return:
-
-{
-  "question": "",
-  "answer": "",
-  "summary": []
-}
+${SPOKEN_RULES}
 
 Interview rules:
-- Write in the FIRST PERSON, as the candidate speaking ("I built...", "In my last role I...").
-- Ground every claim in the background above. Use the real project names, technologies, companies and numbers from it.
-- NEVER invent experience, employers, dates or metrics that are not in the background. If the background does not cover the question, answer honestly from general knowledge and say how you would approach it.
-- For "tell me about a time" questions, use situation → action → result, but say it naturally rather than announcing the structure.
-- Sound like a confident person talking, not like a document being read.
-{{sharedRules}}`;
+- Write in the FIRST PERSON as the candidate. "I built", "we shipped", "in my last role".
+- Use the real project names, technologies, employers and numbers from the background above. Specifics are what make an answer land.
+- NEVER invent experience, employers, dates or numbers that are not in the background. If it does not cover the question, say honestly what you have done that is closest, and how you would approach the rest.
+- For "tell me about a time" questions: what the situation was, what you did, how it turned out. Say it as a story, do not announce the structure.
+- Sound confident and warm. No hedging like "I think maybe I possibly".
 
-/** Formats the résumé and role into the block the interview prompt expects. */
+${FORMAT_RULES}`;
+
+/** Fast path: the model hears the audio and answers in one round trip. */
+const FAST_AUDIO_PROMPT = `You are listening to live {{contextWord}} audio. The person listening will read your answer out loud.
+
+First transcribe what was said, exactly.
+Then work out whether a question was asked of the listener.
+If one was, answer it: {{styleInstruction}} Then give {{pointsInstruction}}.
+If nobody asked a question, put NONE after QUESTION and leave ANSWER empty.
+
+{{profile}}
+
+${SPOKEN_RULES}
+
+Reply in exactly this format and nothing else:
+
+TRANSCRIPT: <exactly what was said>
+QUESTION: <the question, or NONE>
+ANSWER: <the spoken answer, or empty if there was no question>
+POINT: <a short talking point>
+POINT: <another one>`;
+
 const buildProfileBlock = (profile = {}) => {
   const parts = [];
 
@@ -124,19 +131,11 @@ const buildProfileBlock = (profile = {}) => {
   if (profile.notes) parts.push(`Extra notes from the candidate:\n${String(profile.notes).slice(0, 2000)}`);
 
   if (!parts.length) {
-    return 'You have no CV for this candidate, so answer from general knowledge and keep it honest.';
+    return 'You have no CV for this candidate, so answer from general knowledge and stay honest about it.';
   }
   return parts.join('\n\n');
 };
 
-/**
- * @param {object} options
- * @param {string} options.transcript
- * @param {string} [options.context]   recent conversation, for pronouns
- * @param {string} [options.style]     brief | balanced | detailed
- * @param {string} [options.mode]      meeting | interview
- * @param {object} [options.profile]   { resumeText, jobTitle, jobDescription, notes }
- */
 const buildAnswerPrompt = ({ transcript, context = '', style, mode = 'meeting', profile = {} }) => {
   const chosen = styleOf(style);
   const interview = mode === 'interview';
@@ -144,15 +143,84 @@ const buildAnswerPrompt = ({ transcript, context = '', style, mode = 'meeting', 
   const base = (interview ? INTERVIEW_PROMPT : MEETING_PROMPT)
     .replace('{{transcript}}', transcript)
     .replace('{{styleInstruction}}', chosen.instruction)
-    .replace('{{summaryInstruction}}', chosen.summary)
-    .replace('{{profile}}', interview ? buildProfileBlock(profile) : '')
-    .replace('{{sharedRules}}', SHARED_RULES);
+    .replace('{{pointsInstruction}}', chosen.points)
+    .replace('{{profile}}', interview ? buildProfileBlock(profile) : '');
 
   const contextBlock = context
-    ? `\n\nEarlier in this conversation (context only, do not answer these):\n${context}`
+    ? `\n\nEarlier in this conversation, for context only - do not answer these:\n${context}`
     : '';
 
   return { prompt: `${base}${contextBlock}`, maxOutputTokens: chosen.maxOutputTokens };
+};
+
+const buildFastAudioPrompt = ({ context = '', style, mode = 'meeting', profile = {} }) => {
+  const chosen = styleOf(style);
+  const interview = mode === 'interview';
+
+  const base = FAST_AUDIO_PROMPT.replace('{{contextWord}}', interview ? 'job interview' : 'meeting')
+    .replace('{{styleInstruction}}', chosen.instruction)
+    .replace('{{pointsInstruction}}', chosen.points)
+    .replace(
+      '{{profile}}',
+      interview
+        ? `${buildProfileBlock(profile)}\n\nAnswer in the FIRST PERSON as the candidate, using the real details above. Never invent experience.`
+        : ''
+    );
+
+  const contextBlock = context ? `\n\nEarlier in this conversation, for context only:\n${context}` : '';
+
+  return { prompt: `${base}${contextBlock}`, maxOutputTokens: chosen.maxOutputTokens + 300 };
+};
+
+/**
+ * Parses the delimited reply. Tolerant on purpose: it runs on partial text
+ * while the response is still streaming, and it must never throw.
+ */
+const parseDelimited = (text) => {
+  const raw = String(text || '');
+  const result = { transcript: '', question: '', answer: '', summary: [] };
+  if (!raw.trim()) return result;
+
+  let current = null;
+
+  for (const line of raw.split('\n')) {
+    const match = line.match(/^\s*(TRANSCRIPT|QUESTION|ANSWER|POINT)\s*:\s*(.*)$/i);
+
+    if (match) {
+      const key = match[1].toUpperCase();
+      const value = match[2];
+
+      if (key === 'POINT') {
+        if (value.trim()) result.summary.push(value.trim());
+        current = 'POINT';
+      } else {
+        current = key;
+        const field = key.toLowerCase();
+        result[field] = value;
+      }
+      continue;
+    }
+
+    // A continuation of whatever field we are inside.
+    if (current === 'ANSWER') result.answer += (result.answer ? '\n' : '') + line;
+    else if (current === 'POINT' && line.trim() && result.summary.length) {
+      result.summary[result.summary.length - 1] += ` ${line.trim()}`;
+    } else if (current === 'TRANSCRIPT') {
+      result.transcript += (result.transcript ? '\n' : '') + line;
+    }
+  }
+
+  // The model ignored the format entirely - treat the whole thing as the answer.
+  if (!result.answer.trim() && !result.question.trim() && !result.transcript.trim()) {
+    result.answer = raw.trim();
+  }
+
+  result.transcript = result.transcript.trim();
+  result.question = /^\s*none\s*$/i.test(result.question) ? '' : result.question.trim();
+  result.answer = result.answer.trim();
+  result.summary = result.summary.map((point) => point.replace(/^[-•*]\s*/, '').trim()).filter(Boolean);
+
+  return result;
 };
 
 const buildTranscriptionPrompt = (hint = '') =>
@@ -165,7 +233,6 @@ const buildTranscriptionPrompt = (hint = '') =>
     .filter(Boolean)
     .join('\n');
 
-/** One-shot extraction used when a CV is uploaded as a PDF or image. */
 const RESUME_EXTRACTION_PROMPT = `Extract the full text of this CV/résumé.
 
 Return plain text only: no commentary, no markdown, no headings you invented.
@@ -176,9 +243,11 @@ answer credible.`;
 module.exports = {
   STYLES,
   DEFAULT_STYLE,
-  ANSWER_SCHEMA,
+  SPOKEN_RULES,
   buildAnswerPrompt,
+  buildFastAudioPrompt,
   buildProfileBlock,
   buildTranscriptionPrompt,
+  parseDelimited,
   RESUME_EXTRACTION_PROMPT,
 };

@@ -161,6 +161,55 @@ const SettingsPanel = ({
         </div>
       </Card>
 
+      <Card title="Speed" subtitle="Where the seconds go between someone speaking and you seeing an answer">
+        <Toggle
+          checked={ai.fastMode !== false && aiInfo?.fastModeAvailable}
+          disabled={!aiInfo?.fastModeAvailable}
+          onChange={(value) => onPatch({ ai: { fastMode: value } })}
+          label="Fast mode - one round trip"
+          hint={
+            aiInfo?.fastModeAvailable
+              ? 'Sends the audio straight to the answer model instead of transcribing first. About half the wait, but one model call per spoken segment.'
+              : 'Not available on OpenAI - its chat models cannot take audio. Switch to Gemini to use this.'
+          }
+        />
+        <Toggle
+          checked={ai.streaming !== false}
+          onChange={(value) => onPatch({ ai: { streaming: value } })}
+          label="Stream the answer as it is written"
+          hint="Words appear as the model produces them instead of all at once at the end"
+        />
+        <Toggle
+          checked={behaviour.streamToPhone !== false}
+          onChange={(value) => onPatch({ behaviour: { streamToPhone: value } })}
+          label="Stream to the phone too"
+          hint="Costs a few extra Firestore writes per answer. Turn off to save quota."
+        />
+
+        <div className="settings__grid">
+          <Field
+            label="Pause before answering"
+            hint={`${audio.silenceMs} ms of silence ends a sentence. Lower is faster but may cut you off.`}
+          >
+            <input
+              type="range"
+              min="300"
+              max="1500"
+              step="50"
+              value={audio.silenceMs}
+              onChange={(event) => onPatch({ audio: { silenceMs: Number(event.target.value) } })}
+            />
+          </Field>
+        </div>
+
+        {state.stats?.lastAnswerMs && (
+          <p className="muted">
+            Last answer: first words after {state.stats.lastFirstTokenMs ?? '—'} ms, finished in{' '}
+            {state.stats.lastAnswerMs} ms. Add ~{audio.silenceMs} ms of silence detection before that.
+          </p>
+        )}
+      </Card>
+
       <Card title="Audio" subtitle="System audio follows your Windows playback device - Bluetooth, USB or speakers.">
         <Field label="Capture source">
           <select value={audio.deviceId} onChange={(event) => onSelectDevice(event.target.value)}>

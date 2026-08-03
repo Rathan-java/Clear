@@ -50,16 +50,23 @@ class SpeechService extends EventEmitter {
     this.noiseFloor = 0.004;
     this.queue = Promise.resolve();
     this.pendingSegments = 0;
-    this.history = []; // recent final transcripts, used as Gemini context
+    this.history = []; // recent final transcripts, used as model context
     this.stats = { segments: 0, transcribed: 0, empty: 0, errors: 0, words: 0 };
     this.enabled = true;
+
+    /**
+     * Fast mode: Pipeline sets this, and closed segments go straight to it as
+     * audio instead of being transcribed here first. One round trip instead of
+     * two. Returns { transcript } so history stays useful as context.
+     */
+    this.fastHandler = null;
   }
 
   get config() {
     const audio = this.settings.get('audio') || {};
     return {
       sampleRate: audio.sampleRate || 16000,
-      silenceMs: audio.silenceMs ?? 900,
+      silenceMs: audio.silenceMs ?? 600,
       minSpeechMs: audio.minSpeechMs ?? 600,
       maxSegmentMs: audio.maxSegmentMs ?? 14000,
       sensitivity: audio.vadSensitivity ?? 0.55,
@@ -147,6 +154,28 @@ class SpeechService extends EventEmitter {
       .then(async () => {
         const startedAt = Date.now();
         try {
+          // Fast path: hand the audio to the answer model in one call.
+          if (this.fastHandler && this.ai.fastMode) {
+            const { sampleRate } = this.config;
+            const wav = encodeWav(pcm, { sampleRate, channels: 1 });
+            const outcome = await this.fastHandler({
+              wav,
+              spokenMs: Math.round(spokenMs),
+              context: this.context({ lines: 4 }),
+            });
+
+            const spokenText = outcome?.transcript?.trim();
+            if (spokenText) {
+              this.stats.transcribed += 1;
+              this.stats.words += spokenText.split(/\s+/).filter(Boolean).length;
+              this.history.push(spokenText);
+              if (this.history.length > 12) this.history.shift();
+            } else {
+              this.stats.empty += 1;
+            }
+            return;
+          }
+
           const transcript = await this.transcribe(pcm);
           if (!transcript) {
             this.stats.empty += 1;

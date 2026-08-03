@@ -163,20 +163,9 @@ const feed = (service, pcm, chunkMs = 64) => {
   await new Promise((resolve) => setTimeout(resolve, 30));
   check('sub-threshold blips are dropped', blip.metrics().segments === 0, blip.metrics());
 
-  // ---- Gemini response handling -------------------------------------------
-  check(
-    'parses plain JSON',
-    AiService.parseJson('{"question":"a","answer":"b","summary":[]}')?.question === 'a'
-  );
-  check(
-    'parses fenced JSON',
-    AiService.parseJson('```json\n{"question":"a","answer":"b","summary":["c"]}\n```')?.summary[0] === 'c'
-  );
-  check(
-    'parses JSON wrapped in prose',
-    AiService.parseJson('Sure! {"question":"a","answer":"b","summary":[]} hope that helps')?.answer === 'b'
-  );
-  check('returns null for garbage', AiService.parseJson('not json at all') === null);
+  // ---- provider response handling -----------------------------------------
+  // Answers are line-delimited rather than JSON now, because JSON cannot be
+  // shown while it is still streaming. parseDelimited is covered below.
   check(
     'extracts candidate text',
     GeminiProvider.extractText({ candidates: [{ content: { parts: [{ text: 'hello ' }, { text: 'world' }] } }] }) ===
@@ -208,8 +197,11 @@ const feed = (service, pcm, chunkMs = 64) => {
 
   const brief = buildAnswerPrompt({ transcript: 'What is the timeline?', style: 'brief' });
   const detailed = buildAnswerPrompt({ transcript: 'What is the timeline?', style: 'detailed' });
-  check('brief asks for 1-2 sentences', /1-2 sentences/.test(brief.prompt));
-  check('detailed asks for much more', /150-250 words/.test(detailed.prompt));
+  // Assert the chosen style's instruction actually reaches the prompt, rather
+  // than a specific phrasing - the wording gets tuned, the wiring must not break.
+  check('brief carries the brief instruction', brief.prompt.includes(STYLES.brief.instruction));
+  check('detailed carries the detailed instruction', detailed.prompt.includes(STYLES.detailed.instruction));
+  check('the two styles differ', STYLES.brief.instruction !== STYLES.detailed.instruction);
   check('detailed allows more output tokens', detailed.maxOutputTokens > brief.maxOutputTokens * 3);
   check('unknown style falls back to balanced', buildAnswerPrompt({ transcript: 'x' }).maxOutputTokens === STYLES.balanced.maxOutputTokens);
 
@@ -232,6 +224,44 @@ const feed = (service, pcm, chunkMs = 64) => {
     'interview mode without a CV says so',
     /no CV for this candidate/.test(buildAnswerPrompt({ transcript: 'x', mode: 'interview' }).prompt)
   );
+
+  // ---- spoken register -----------------------------------------------------
+  const { SPOKEN_RULES, parseDelimited, buildFastAudioPrompt } = require('../src/ai/prompts');
+
+  const spoken = buildAnswerPrompt({ transcript: 'How did the migration go?' }).prompt;
+  check('tells the model it will be read aloud', /READ ALOUD/.test(spoken));
+  check('asks for contractions', /contractions/i.test(spoken));
+  check('bans written-register words', /utilize|leverage|furthermore/.test(SPOKEN_RULES));
+  check('bans markdown inside the answer', /No bullet characters/i.test(spoken));
+  check('forbids repeating the question back', /Do not repeat the question back/i.test(spoken));
+  check('forbids "Great question"', /Great question/.test(spoken));
+
+  // ---- streaming parser ----------------------------------------------------
+  const full = parseDelimited(
+    'QUESTION: How did the migration go?\nANSWER: It went well. We cut latency by about forty percent.\nPOINT: Zero downtime\nPOINT: Rolled out over two weeks'
+  );
+  check('parses the delimited reply', full.question.startsWith('How did') && full.summary.length === 2);
+  check('keeps the whole answer', full.answer.includes('forty percent'));
+
+  const midStream = parseDelimited('QUESTION: How did it go?\nANSWER: It went we');
+  check('parses a half-written answer', midStream.answer === 'It went we' && midStream.summary.length === 0);
+
+  const multiline = parseDelimited('ANSWER: First line.\nSecond line.\nPOINT: a point');
+  check('answers can span lines', multiline.answer === 'First line.\nSecond line.');
+  check('points still parse after a multi-line answer', multiline.summary[0] === 'a point');
+
+  check('NONE means no question', parseDelimited('QUESTION: NONE\nANSWER: ').question === '');
+  check('an unformatted reply still yields an answer', parseDelimited('Just talking here.').answer === 'Just talking here.');
+  check('empty input does not throw', parseDelimited('').answer === '');
+  check('null input does not throw', parseDelimited(null).answer === '');
+  check(
+    'strips bullet characters from points',
+    parseDelimited('ANSWER: x\nPOINT: - dashed point').summary[0] === 'dashed point'
+  );
+
+  const fast = buildFastAudioPrompt({ style: 'brief' });
+  check('fast prompt asks for a transcript too', /TRANSCRIPT:/.test(fast.prompt));
+  check('fast prompt allows extra tokens for the transcript', fast.maxOutputTokens > STYLES.brief.maxOutputTokens);
 
   // ---- document parsing ----------------------------------------------------
   const { extractText } = require('../src/profile/documentText');

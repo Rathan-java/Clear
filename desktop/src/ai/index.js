@@ -3,7 +3,7 @@
 const { EventEmitter } = require('events');
 const { GeminiProvider, ProviderError } = require('./GeminiProvider');
 const { OpenAIProvider } = require('./OpenAIProvider');
-const { STYLES, DEFAULT_STYLE } = require('./prompts');
+const { STYLES, DEFAULT_STYLE, parseDelimited } = require('./prompts');
 
 const PROVIDERS = { gemini: GeminiProvider, openai: OpenAIProvider };
 
@@ -12,25 +12,24 @@ const PROVIDERS = { gemini: GeminiProvider, openai: OpenAIProvider };
  * ---------
  * One façade over whichever provider is selected. Everything downstream -
  * SpeechService, Pipeline - talks to this and never knows which model is
- * behind it, so switching provider at runtime changes nothing else.
+ * behind it.
  *
- * Keeps the same surface the old GeminiService had: generateAnswer(),
- * transcribeAudio(), testConnection(), metrics().
+ * Two paths to an answer:
+ *   standard  transcribe, then answer from the text. Two round trips, but the
+ *             transcript is checked locally for a question first, so a model
+ *             call only happens when someone actually asked something.
+ *   fast      hand the audio straight to the answer model and get the
+ *             transcript and the answer back together. One round trip, so
+ *             roughly half the latency, at the cost of a call per segment.
  */
 class AiService extends EventEmitter {
-  /**
-   * @param {object} options
-   * @param {(provider: string) => string|null} options.getApiKey  key for a given provider id
-   * @param {() => object} options.getConfig    the whole `ai` settings block
-   * @param {() => object} options.getProfile   { resumeText, jobTitle, ... }
-   */
   constructor({ getApiKey, getConfig, getProfile, logger }) {
     super();
     this.getApiKey = getApiKey;
     this.getConfig = getConfig || (() => ({}));
     this.getProfile = getProfile || (() => ({}));
     this.log = logger;
-    this.stats = { calls: 0, failures: 0, totalLatencyMs: 0, lastLatencyMs: null };
+    this.stats = { calls: 0, failures: 0, totalLatencyMs: 0, lastLatencyMs: null, firstTokenMs: null };
   }
 
   get providerId() {
@@ -56,65 +55,132 @@ class AiService extends EventEmitter {
     return Boolean(this.getApiKey(this.providerId));
   }
 
-  static parseJson(text) {
-    if (!text) return null;
+  /** Fast mode needs a provider that accepts audio; OpenAI chat does not. */
+  get fastModeAvailable() {
+    return this.ProviderClass.canAnswerFromAudio;
+  }
+
+  get fastMode() {
+    return this.getConfig().fastMode !== false && this.fastModeAvailable;
+  }
+
+  get streaming() {
+    return this.getConfig().streaming !== false;
+  }
+
+  promptOptions() {
+    const config = this.getConfig();
+    return {
+      style: config.answerStyle || DEFAULT_STYLE,
+      mode: config.mode || 'meeting',
+      profile: config.mode === 'interview' ? this.getProfile() : {},
+    };
+  }
+
+  /**
+   * Shared tail for both paths: run the request, stream partials out, and
+   * shape the delimited reply into the result object Pipeline expects.
+   */
+  async run(request, { onPartial, startedAt }) {
+    let firstTokenMs = null;
+
+    const wrapped = onPartial
+      ? (full) => {
+          if (firstTokenMs === null) {
+            firstTokenMs = Date.now() - startedAt;
+            this.stats.firstTokenMs = firstTokenMs;
+          }
+          const partial = parseDelimited(full);
+          // Only worth surfacing once the answer itself has started.
+          if (partial.answer) onPartial(partial);
+        }
+      : undefined;
+
+    const { text, model } = await request(wrapped);
+    const parsed = parseDelimited(text);
+
+    if (!parsed.answer && !parsed.question && !parsed.transcript) {
+      throw new ProviderError('The model returned an empty response', { retryable: true });
+    }
+
+    const latencyMs = Date.now() - startedAt;
+    this.stats.calls += 1;
+    this.stats.lastLatencyMs = latencyMs;
+    this.stats.totalLatencyMs += latencyMs;
+
+    return {
+      transcript: parsed.transcript,
+      question: parsed.question,
+      answer: parsed.answer,
+      summary: parsed.summary,
+      latencyMs,
+      firstTokenMs,
+      model: `${this.providerId}/${model}`,
+    };
+  }
+
+  /** Answer from an already-transcribed line. */
+  async generateAnswer(transcript, { context = '', onPartial } = {}) {
+    const startedAt = Date.now();
+    const options = this.promptOptions();
+
     try {
-      return JSON.parse(text);
-    } catch {
-      // Models occasionally wrap JSON in prose or a fenced block.
-      const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-      const candidate = fenced ? fenced[1] : text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
-      try {
-        return JSON.parse(candidate);
-      } catch {
-        return null;
-      }
+      const result = await this.run(
+        (wrapped) =>
+          this.provider.generateAnswer(transcript, {
+            ...options,
+            context,
+            onPartial: this.streaming ? wrapped : undefined,
+          }),
+        { onPartial: this.streaming ? onPartial : null, startedAt }
+      );
+
+      this.log?.info('Answer generated', {
+        provider: this.providerId,
+        mode: options.mode,
+        style: options.style,
+        latencyMs: result.latencyMs,
+        firstTokenMs: result.firstTokenMs,
+      });
+
+      return { ...result, transcript: result.transcript || transcript };
+    } catch (error) {
+      this.stats.failures += 1;
+      throw error;
     }
   }
 
   /**
-   * generateAnswer(transcript) -> { question, answer, summary[] }
-   * `mode` is meeting | interview; interview answers are written in the first
-   * person and grounded in the stored CV.
+   * Fast path: audio in, transcript and answer out, one round trip.
+   * Falls back automatically when the provider cannot take audio.
    */
-  async generateAnswer(transcript, { context = '' } = {}) {
-    const config = this.getConfig();
+  async answerFromAudio(buffer, { mimeType = 'audio/wav', context = '', hint = '', onPartial } = {}) {
+    if (!this.fastModeAvailable) {
+      const transcript = await this.transcribeAudio(buffer, { mimeType, hint });
+      if (!transcript) return null;
+      return this.generateAnswer(transcript, { context, onPartial });
+    }
+
     const startedAt = Date.now();
+    const options = this.promptOptions();
 
     try {
-      const { text, model } = await this.provider.generateAnswer(transcript, {
-        context,
-        style: config.answerStyle || DEFAULT_STYLE,
-        mode: config.mode || 'meeting',
-        profile: config.mode === 'interview' ? this.getProfile() : {},
-      });
+      const result = await this.run(
+        (wrapped) =>
+          this.provider.answerFromAudio(buffer, {
+            ...options,
+            mimeType,
+            context,
+            onPartial: this.streaming ? wrapped : undefined,
+          }),
+        { onPartial: this.streaming ? onPartial : null, startedAt }
+      );
 
-      const parsed = AiService.parseJson(text);
-      if (!parsed) {
-        throw new ProviderError('The model returned a response that was not valid JSON', { retryable: false });
-      }
-
-      const latencyMs = Date.now() - startedAt;
-      this.stats.calls += 1;
-      this.stats.lastLatencyMs = latencyMs;
-      this.stats.totalLatencyMs += latencyMs;
-
-      const result = {
-        question: String(parsed.question || '').trim(),
-        answer: String(parsed.answer || '').trim(),
-        summary: Array.isArray(parsed.summary) ? parsed.summary.map((s) => String(s).trim()).filter(Boolean) : [],
-        latencyMs,
-        model: `${this.providerId}/${model}`,
-        transcript,
-      };
-
-      this.emit('answer', result);
-      this.log?.info('Answer generated', {
+      this.log?.info('Fast answer generated', {
         provider: this.providerId,
-        mode: config.mode,
-        style: config.answerStyle,
-        latencyMs,
-        answerChars: result.answer.length,
+        latencyMs: result.latencyMs,
+        firstTokenMs: result.firstTokenMs,
+        hasQuestion: Boolean(result.question),
       });
 
       return result;
@@ -136,11 +202,18 @@ class AiService extends EventEmitter {
     return this.provider.testConnection();
   }
 
-  /** Everything the Settings screen needs to render the provider pickers. */
+  /** Everything the Settings screen needs to render its pickers. */
   describe() {
     return {
       active: this.providerId,
-      styles: Object.entries(STYLES).map(([id, style]) => ({ id, label: style.label, hint: style.instruction })),
+      fastMode: this.fastMode,
+      fastModeAvailable: this.fastModeAvailable,
+      streaming: this.streaming,
+      styles: Object.entries(STYLES).map(([id, style]) => ({
+        id,
+        label: style.label,
+        hint: style.instruction,
+      })),
       providers: Object.values(PROVIDERS).map((Provider) => ({
         id: Provider.id,
         label: Provider.label,
@@ -149,6 +222,7 @@ class AiService extends EventEmitter {
         answerModels: Provider.answerModels,
         transcribeModels: Provider.transcribeModels,
         canReadDocuments: Provider.canReadDocuments,
+        canAnswerFromAudio: Provider.canAnswerFromAudio,
         configured: Boolean(this.getApiKey(Provider.id)),
       })),
     };
@@ -161,6 +235,7 @@ class AiService extends EventEmitter {
       configured: this.configured,
       provider: this.providerId,
       mode: this.getConfig().mode || 'meeting',
+      fastMode: this.fastMode,
     };
   }
 }

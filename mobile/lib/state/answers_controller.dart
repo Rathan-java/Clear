@@ -65,6 +65,12 @@ class AnswersController extends StateNotifier<AnswersState> {
   List<Answer> _older = const [];
   bool _primed = false;
 
+  /// Answers already announced. Streaming means a document is created while it
+  /// is still half-written and patched repeatedly, so "added" is the wrong
+  /// trigger - we would notify with a fragment of a sentence, then again for
+  /// every update. Notify once, when it is finished.
+  final Set<String> _notified = <String>{};
+
   void _listen() {
     _subscription?.cancel();
     _primed = false;
@@ -73,19 +79,29 @@ class AnswersController extends StateNotifier<AnswersState> {
       (snapshot) {
         final live = snapshot.docs.map(Answer.fromDoc).toList();
 
-        // Notify only for answers that arrive after the first load, and never
-        // for documents the local cache is only echoing back.
-        if (_primed) {
-          final fresh = snapshot.docChanges
-              .where((change) => change.type == DocumentChangeType.added && !change.doc.metadata.hasPendingWrites)
+        if (!_primed) {
+          // First snapshot is the existing backlog; never announce that.
+          for (final doc in snapshot.docs) {
+            _notified.add(doc.id);
+          }
+        } else {
+          // Announce an answer once, when the desktop has finished writing it.
+          final finished = snapshot.docChanges
+              .where((change) => change.type != DocumentChangeType.removed)
+              .where((change) => !change.doc.metadata.hasPendingWrites)
               .map((change) => Answer.fromDoc(change.doc))
-              .where((answer) => answer.answer.isNotEmpty)
+              .where((answer) => !answer.streaming && answer.answer.isNotEmpty)
+              .where((answer) => !_notified.contains(answer.id))
               .toList();
 
-          if (fresh.isNotEmpty) {
-            state = state.copyWith(unread: state.unread + fresh.length);
+          if (finished.isNotEmpty) {
+            for (final answer in finished) {
+              _notified.add(answer.id);
+            }
+            state = state.copyWith(unread: state.unread + finished.length);
+
             if (_storage.notificationsEnabled) {
-              for (final answer in fresh) {
+              for (final answer in finished) {
                 NotificationService.instance.showAnswer(answer);
               }
             }
@@ -93,6 +109,11 @@ class AnswersController extends StateNotifier<AnswersState> {
         }
 
         _primed = true;
+        // Keep the guard set from growing without bound over a long meeting.
+        if (_notified.length > 400) {
+          final keep = live.map((a) => a.id).toSet();
+          _notified.retainWhere(keep.contains);
+        }
 
         // Merge in any older pages already fetched, newest first, de-duplicated.
         final seen = live.map((a) => a.id).toSet();
