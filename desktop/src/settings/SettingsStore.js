@@ -20,12 +20,20 @@ const DEFAULTS = {
     apiKey: '',
     projectId: '',
   },
-  gemini: {
-    model: 'gemini-2.5-flash',
-    transcribeModel: 'gemini-2.5-flash',
-    temperature: 0.3,
-    maxOutputTokens: 700,
-    answerStyle: 'concise', // concise | detailed
+  ai: {
+    provider: 'gemini', // gemini | openai
+    mode: 'meeting', // meeting | interview
+    answerStyle: 'balanced', // brief | balanced | detailed
+    gemini: {
+      model: 'gemini-2.5-flash',
+      transcribeModel: 'gemini-2.5-flash',
+      temperature: 0.3,
+    },
+    openai: {
+      model: 'gpt-4o-mini',
+      transcribeModel: 'whisper-1',
+      temperature: 0.3,
+    },
   },
   audio: {
     mode: 'loopback', // loopback | device | ffmpeg
@@ -61,7 +69,7 @@ const DEFAULTS = {
   },
 };
 
-const SECRET_KEYS = ['geminiApiKey', 'refreshToken'];
+const SECRET_KEYS = ['geminiApiKey', 'openaiApiKey', 'refreshToken'];
 
 const deepMerge = (base, override) => {
   if (Array.isArray(base) || typeof base !== 'object' || base === null) {
@@ -112,8 +120,11 @@ class SettingsStore extends EventEmitter {
     if (process.env.GEMINI_API_KEY && !this.secrets.geminiApiKey) {
       this.secrets.geminiApiKey = process.env.GEMINI_API_KEY;
     }
-    if (process.env.GEMINI_MODEL) this.data.gemini.model = process.env.GEMINI_MODEL;
-    if (process.env.GEMINI_TRANSCRIBE_MODEL) this.data.gemini.transcribeModel = process.env.GEMINI_TRANSCRIBE_MODEL;
+    if (process.env.OPENAI_API_KEY && !this.secrets.openaiApiKey) {
+      this.secrets.openaiApiKey = process.env.OPENAI_API_KEY;
+    }
+    if (process.env.GEMINI_MODEL) this.data.ai.gemini.model = process.env.GEMINI_MODEL;
+    if (process.env.OPENAI_MODEL) this.data.ai.openai.model = process.env.OPENAI_MODEL;
 
     if (!this.data.device.id) {
       this.data.device.id = `desktop-${require('crypto').randomBytes(8).toString('hex')}`;
@@ -170,9 +181,10 @@ class SettingsStore extends EventEmitter {
 
   /** Merge a partial settings object, persist, and notify listeners. */
   patch(partial = {}) {
-    const { geminiApiKey, refreshToken, ...rest } = partial;
+    const { geminiApiKey, openaiApiKey, refreshToken, ...rest } = partial;
 
     if (geminiApiKey !== undefined) this.setSecret('geminiApiKey', geminiApiKey);
+    if (openaiApiKey !== undefined) this.setSecret('openaiApiKey', openaiApiKey);
     if (refreshToken !== undefined) this.setSecret('refreshToken', refreshToken);
 
     this.data = deepMerge(this.data, rest);
@@ -191,14 +203,16 @@ class SettingsStore extends EventEmitter {
     return this.secrets[key] || null;
   }
 
-  /** Everything the renderer is allowed to see - secrets reduced to a boolean. */
+  /** Everything the renderer is allowed to see - secrets reduced to a preview. */
   public() {
+    const preview = (value) => (value ? `${value.slice(0, 4)}...${value.slice(-4)}` : null);
+
     return {
       ...this.data,
-      hasGeminiKey: Boolean(this.secrets.geminiApiKey),
-      geminiKeyPreview: this.secrets.geminiApiKey
-        ? `${this.secrets.geminiApiKey.slice(0, 4)}...${this.secrets.geminiApiKey.slice(-4)}`
-        : null,
+      keys: {
+        gemini: { present: Boolean(this.secrets.geminiApiKey), preview: preview(this.secrets.geminiApiKey) },
+        openai: { present: Boolean(this.secrets.openaiApiKey), preview: preview(this.secrets.openaiApiKey) },
+      },
       encryptionAvailable: this.encryptionAvailable,
       settingsPath: this.file,
     };

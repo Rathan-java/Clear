@@ -9,6 +9,7 @@ const {
   session,
   desktopCapturer,
   globalShortcut,
+  dialog,
   Notification,
   safeStorage,
   nativeImage,
@@ -20,7 +21,8 @@ const { setAutoLaunch, isAutoLaunchEnabled, wasAutoLaunched } = require('../sett
 const { FirebaseAuth } = require('../firebase/FirebaseAuth');
 const { FirestoreClient } = require('../firebase/FirestoreClient');
 const { FirestoreSync } = require('../firebase/FirestoreSync');
-const { GeminiService } = require('../gemini/GeminiService');
+const { AiService } = require('../ai');
+const { ProfileStore } = require('../profile/ProfileStore');
 const { SpeechService } = require('../speech/SpeechService');
 const { AudioCaptureService } = require('../audio/AudioCaptureService');
 const { Pipeline } = require('../core/Pipeline');
@@ -152,13 +154,24 @@ const buildServices = () => {
   const auth = new FirebaseAuth({ settings, logger: logger.scoped('auth') });
   const firestore = new FirestoreClient({ auth, settings, logger: logger.scoped('firestore') });
 
-  const gemini = new GeminiService({
-    getApiKey: () => settings.getSecret('geminiApiKey'),
-    getConfig: () => settings.get('gemini'),
-    logger: logger.scoped('gemini'),
+  // The profile is read lazily by the AI service, so the two can be built in
+  // either order without a circular dependency.
+  let profile = null;
+
+  const ai = new AiService({
+    getApiKey: (provider) => settings.getSecret(`${provider}ApiKey`),
+    getConfig: () => settings.get('ai'),
+    getProfile: () => profile?.get() || {},
+    logger: logger.scoped('ai'),
   });
 
-  const speech = new SpeechService({ gemini, settings, logger: logger.scoped('speech') });
+  profile = new ProfileStore({
+    userDataPath: app.getPath('userData'),
+    ai,
+    logger: logger.scoped('profile'),
+  });
+
+  const speech = new SpeechService({ ai, settings, logger: logger.scoped('speech') });
 
   const audio = new AudioCaptureService({
     getWindow: () => mainWindow,
@@ -168,9 +181,9 @@ const buildServices = () => {
 
   const sync = new FirestoreSync({ auth, firestore, settings, logger: logger.scoped('sync') });
 
-  const pipeline = new Pipeline({ audio, speech, gemini, sync, auth, settings, logger: logger.scoped('pipeline') });
+  const pipeline = new Pipeline({ audio, speech, ai, sync, auth, settings, logger: logger.scoped('pipeline') });
 
-  return { settings, auth, firestore, gemini, speech, audio, sync, pipeline };
+  return { settings, auth, firestore, ai, profile, speech, audio, sync, pipeline };
 };
 
 const broadcast = (channel, payload) => {
@@ -178,7 +191,7 @@ const broadcast = (channel, payload) => {
 };
 
 const registerIpc = () => {
-  const { settings, auth, gemini, audio, sync, pipeline } = services;
+  const { settings, auth, ai, profile, audio, sync, pipeline } = services;
 
   const ok = (data = {}) => ({ ok: true, ...data });
   const fail = (error) => ({ ok: false, error: error.message || String(error) });
@@ -288,10 +301,40 @@ const registerIpc = () => {
     return ok();
   });
 
-  ipcMain.handle('gemini:test', async () => {
+  ipcMain.handle('ai:describe', () => ai.describe());
+
+  ipcMain.handle('ai:test', async () => {
     try {
-      return ok(await gemini.testConnection());
+      return ok(await ai.testConnection());
     } catch (error) {
+      return fail(error);
+    }
+  });
+
+  // ---- candidate profile / CV --------------------------------------------
+
+  ipcMain.handle('profile:get', (_event, options) => profile.public(options || {}));
+
+  ipcMain.handle('profile:patch', (_event, partial) => ok({ profile: profile.patch(partial || {}) }));
+
+  ipcMain.handle('profile:clearResume', () => ok({ profile: profile.clearResume() }));
+
+  ipcMain.handle('profile:import', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose your CV',
+      properties: ['openFile'],
+      filters: [
+        { name: 'CV / résumé', extensions: ['pdf', 'docx', 'txt', 'md'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+
+    if (result.canceled || !result.filePaths.length) return { ok: false, cancelled: true };
+
+    try {
+      return ok({ profile: await profile.importFile(result.filePaths[0]) });
+    } catch (error) {
+      log.error('CV import failed', { error: error.message });
       return fail(error);
     }
   });

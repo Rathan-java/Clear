@@ -4,6 +4,7 @@ import StatusBar from './components/StatusBar.jsx';
 import LoginView from './components/LoginView.jsx';
 import LivePanel from './components/LivePanel.jsx';
 import PhonePanel from './components/PhonePanel.jsx';
+import ProfilePanel from './components/ProfilePanel.jsx';
 import SettingsPanel from './components/SettingsPanel.jsx';
 import LogsPanel from './components/LogsPanel.jsx';
 
@@ -14,6 +15,7 @@ const App = () => {
   const [settings, setSettings] = useState(null);
   const [info, setInfo] = useState(null);
   const [devices, setDevices] = useState([]);
+  const [aiInfo, setAiInfo] = useState(null);
   const [logs, setLogs] = useState([]);
   const [tab, setTab] = useState('live');
   const [toast, setToast] = useState(null);
@@ -34,17 +36,19 @@ const App = () => {
     let mounted = true;
 
     (async () => {
-      const [initialState, initialSettings, appInfo, initialLogs] = await Promise.all([
+      const [initialState, initialSettings, appInfo, initialLogs, describeAi] = await Promise.all([
         api.invoke('app:state'),
         api.invoke('settings:get'),
         api.invoke('app:info'),
         api.invoke('app:logs', 150),
+        api.invoke('ai:describe'),
       ]);
       if (!mounted) return;
       setState(initialState);
       setSettings(initialSettings);
       setInfo(appInfo);
       setLogs(initialLogs);
+      setAiInfo(describeAi);
       refreshDevices();
     })();
 
@@ -77,6 +81,8 @@ const App = () => {
   const patchSettings = useCallback(async (partial) => {
     const next = await api.invoke('settings:patch', partial);
     setSettings(next);
+    // Provider or key changes alter what the settings screen should offer.
+    setAiInfo(await api.invoke('ai:describe'));
     return next;
   }, []);
 
@@ -103,7 +109,7 @@ const App = () => {
           : { tone: 'error', message: result.error }
       );
     },
-    onTestGemini: () => api.invoke('gemini:test'),
+    onTestAi: () => api.invoke('ai:test'),
     onLogout: async () => {
       await api.invoke('auth:logout');
       setTab('live');
@@ -159,14 +165,17 @@ const App = () => {
 
         {tab === 'pair' && <PhonePanel state={state} />}
 
+        {tab === 'profile' && <ProfilePanel settings={settings} onPatchSettings={patchSettings} />}
+
         {tab === 'settings' && (
           <SettingsPanel
             settings={settings}
             info={info}
             devices={devices}
             state={state}
+            aiInfo={aiInfo}
             onPatch={patchSettings}
-            onTestGemini={handlers.onTestGemini}
+            onTestAi={handlers.onTestAi}
             onSelectDevice={handlers.onSelectDevice}
             onLogout={handlers.onLogout}
             onOpenLogs={handlers.onOpenLogs}

@@ -36,9 +36,9 @@ const SOFT_ASKS = [
 ];
 
 class SpeechService extends EventEmitter {
-  constructor({ gemini, settings, logger }) {
+  constructor({ ai, settings, logger }) {
     super();
-    this.gemini = gemini;
+    this.ai = ai;
     this.settings = settings;
     this.log = logger;
 
@@ -193,7 +193,7 @@ class SpeechService extends EventEmitter {
     const { sampleRate } = this.config;
     const wav = encodeWav(pcm, { sampleRate, channels: 1 });
     const hint = this.history.slice(-2).join(' ').slice(-300);
-    const text = await this.gemini.transcribeAudio(wav, { mimeType: 'audio/wav', hint });
+    const text = await this.ai.transcribeAudio(wav, { mimeType: 'audio/wav', hint });
     return cleanTranscript(text);
   }
 

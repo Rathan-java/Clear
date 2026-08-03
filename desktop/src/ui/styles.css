@@ -786,6 +786,120 @@ input[type='range'] {
   font-size: 12px;
 }
 
+/* ---------- profile / interview ---------- */
+
+.profile {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.mode-switch,
+.provider-switch,
+.style-switch {
+  display: grid;
+  gap: 10px;
+}
+
+.mode-switch,
+.provider-switch {
+  grid-template-columns: 1fr 1fr;
+}
+
+.mode-option,
+.provider-option,
+.style-option {
+  text-align: left;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.mode-option:hover,
+.provider-option:hover,
+.style-option:hover {
+  border-color: var(--accent);
+}
+
+.mode-option.is-active,
+.provider-option.is-active,
+.style-option.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+.mode-option span:not(.mode-option__icon),
+.style-option span {
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.mode-option__icon {
+  font-size: 20px;
+}
+
+.provider-option {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cv-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cv-preview {
+  margin: 0;
+  max-height: 230px;
+  overflow-y: auto;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--text-dim);
+}
+
+.cv-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cv-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 11px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+
+.cv-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .login__note {
   margin: 0;
   font-size: 12.5px;

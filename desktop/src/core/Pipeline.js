@@ -8,7 +8,7 @@ const { EventEmitter } = require('events');
  * The one place that knows the whole flow:
  *
  *   speaker audio -> AudioCaptureService -> SpeechService (STT + question
- *   detection) -> GeminiService -> Firestore -> phone
+ *   detection) -> AiService (Gemini or OpenAI) -> Firestore -> phone
  *
  * The phone is never contacted directly. The answer is written to Firestore and
  * the phone's live listener picks it up, wherever it happens to be.
@@ -20,11 +20,11 @@ const MAX_TRANSCRIPT_LINES = 60;
 const MAX_ANSWERS = 30;
 
 class Pipeline extends EventEmitter {
-  constructor({ audio, speech, gemini, sync, auth, settings, logger }) {
+  constructor({ audio, speech, ai, sync, auth, settings, logger }) {
     super();
     this.audio = audio;
     this.speech = speech;
-    this.gemini = gemini;
+    this.ai = ai;
     this.sync = sync;
     this.auth = auth;
     this.settings = settings;
@@ -41,7 +41,7 @@ class Pipeline extends EventEmitter {
       auth: { signedIn: false, email: null },
       capture: audio.state(),
       connection: sync.status(),
-      gemini: gemini.metrics(),
+      ai: ai.metrics(),
       speech: speech.metrics(),
       transcript: { live: '', lines: [] },
       question: null,
@@ -97,7 +97,7 @@ class Pipeline extends EventEmitter {
   emitState({ quiet = false } = {}) {
     this.state.running = this.running;
     this.state.thinking = this.thinking;
-    this.state.gemini = this.gemini.metrics();
+    this.state.ai = this.ai.metrics();
     this.state.speech = this.speech.metrics();
     this.state.auth = {
       signedIn: this.auth.signedIn,
@@ -148,10 +148,11 @@ class Pipeline extends EventEmitter {
     await this.answer({ transcript, question });
   }
 
-  /** Runs Gemini and ships the result. Also used by "Ask manually" in the UI. */
+  /** Runs the model and ships the result. Also used by "Ask manually" in the UI. */
   async answer({ transcript, question = '', manual = false }) {
-    if (!this.gemini.configured) {
-      this.state.notice = { type: 'error', message: 'Add your Gemini API key in Settings' };
+    if (!this.ai.configured) {
+      const provider = this.ai.providerId === 'openai' ? 'OpenAI' : 'Gemini';
+      this.state.notice = { type: 'error', message: `Add your ${provider} API key in Settings` };
       this.emitState();
       return null;
     }
@@ -161,13 +162,13 @@ class Pipeline extends EventEmitter {
     const startedAt = Date.now();
 
     try {
-      const result = await this.gemini.generateAnswer(question || transcript, {
+      const result = await this.ai.generateAnswer(question || transcript, {
         context: this.speech.context({ lines: 5 }),
       });
 
-      // Gemini decided this was not a question after all.
+      // The model decided this was not a question after all.
       if (!result.answer || (!result.question && !manual && this.settings.get('behaviour.answerOnlyQuestions'))) {
-        this.log?.debug('Gemini found no question to answer');
+        this.log?.debug('No question found to answer');
         return null;
       }
 
@@ -217,7 +218,7 @@ class Pipeline extends EventEmitter {
       return answer;
     } catch (error) {
       this.state.stats.errors += 1;
-      this.state.notice = { type: 'error', message: `Gemini: ${error.message}` };
+      this.state.notice = { type: 'error', message: `${this.ai.providerId}: ${error.message}` };
       this.log?.error('Answer generation failed', { error: error.message });
       return null;
     } finally {
@@ -231,8 +232,9 @@ class Pipeline extends EventEmitter {
   async start() {
     if (this.running) return this.state;
 
-    if (!this.gemini.configured) {
-      throw new Error('Add your Gemini API key in Settings before starting');
+    if (!this.ai.configured) {
+      const provider = this.ai.providerId === 'openai' ? 'OpenAI' : 'Gemini';
+      throw new Error(`Add your ${provider} API key in Settings before starting`);
     }
 
     this.speech.reset();
@@ -283,7 +285,7 @@ class Pipeline extends EventEmitter {
     this.state.thinking = this.thinking;
     this.state.capture = this.audio.state();
     this.state.connection = this.sync.status();
-    this.state.gemini = this.gemini.metrics();
+    this.state.ai = this.ai.metrics();
     this.state.speech = this.speech.metrics();
     this.state.auth = {
       signedIn: this.auth.signedIn,

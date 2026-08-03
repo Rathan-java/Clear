@@ -9,7 +9,8 @@
  */
 
 const { SpeechService } = require('../src/speech/SpeechService');
-const { GeminiService } = require('../src/gemini/GeminiService');
+const { AiService } = require('../src/ai');
+const { GeminiProvider } = require('../src/ai/GeminiProvider');
 const { encodeWav, rms, durationMs } = require('../src/audio/wav');
 
 let passed = 0;
@@ -71,7 +72,7 @@ const feed = (service, pcm, chunkMs = 64) => {
   check('rms of silence is 0', rms(makePcm(200, 0)) === 0);
 
   // ---- Question detection --------------------------------------------------
-  const speech = new SpeechService({ gemini: { transcribeAudio: async () => '' }, settings, logger: null });
+  const speech = new SpeechService({ ai: { transcribeAudio: async () => '' }, settings, logger: null });
 
   const questions = [
     'How do we handle authentication on the mobile app?',
@@ -102,7 +103,7 @@ const feed = (service, pcm, chunkMs = 64) => {
   // ---- VAD segmentation ----------------------------------------------------
   const transcribed = [];
   const vadService = new SpeechService({
-    gemini: {
+    ai: {
       transcribeAudio: async (wavBuffer) => {
         transcribed.push(wavBuffer);
         return 'How long does the migration take?';
@@ -134,7 +135,7 @@ const feed = (service, pcm, chunkMs = 64) => {
 
   // Silence alone must not cost a Gemini call.
   const quiet = new SpeechService({
-    gemini: {
+    ai: {
       transcribeAudio: async () => {
         throw new Error('should not be called for silence');
       },
@@ -148,7 +149,7 @@ const feed = (service, pcm, chunkMs = 64) => {
 
   // A 200 ms blip is below minSpeechMs and should be dropped.
   const blip = new SpeechService({
-    gemini: {
+    ai: {
       transcribeAudio: async () => {
         throw new Error('should not be called for a blip');
       },
@@ -165,30 +166,112 @@ const feed = (service, pcm, chunkMs = 64) => {
   // ---- Gemini response handling -------------------------------------------
   check(
     'parses plain JSON',
-    GeminiService.parseJson('{"question":"a","answer":"b","summary":[]}')?.question === 'a'
+    AiService.parseJson('{"question":"a","answer":"b","summary":[]}')?.question === 'a'
   );
   check(
     'parses fenced JSON',
-    GeminiService.parseJson('```json\n{"question":"a","answer":"b","summary":["c"]}\n```')?.summary[0] === 'c'
+    AiService.parseJson('```json\n{"question":"a","answer":"b","summary":["c"]}\n```')?.summary[0] === 'c'
   );
   check(
     'parses JSON wrapped in prose',
-    GeminiService.parseJson('Sure! {"question":"a","answer":"b","summary":[]} hope that helps')?.answer === 'b'
+    AiService.parseJson('Sure! {"question":"a","answer":"b","summary":[]} hope that helps')?.answer === 'b'
   );
-  check('returns null for garbage', GeminiService.parseJson('not json at all') === null);
+  check('returns null for garbage', AiService.parseJson('not json at all') === null);
   check(
     'extracts candidate text',
-    GeminiService.extractText({ candidates: [{ content: { parts: [{ text: 'hello ' }, { text: 'world' }] } }] }) ===
+    GeminiProvider.extractText({ candidates: [{ content: { parts: [{ text: 'hello ' }, { text: 'world' }] } }] }) ===
       'hello world'
   );
-  check('extractText survives an empty response', GeminiService.extractText({}) === '');
+  check('extractText survives an empty response', GeminiProvider.extractText({}) === '');
 
-  const unconfigured = new GeminiService({ getApiKey: () => null, getConfig: () => ({}) });
+  const unconfigured = new AiService({ getApiKey: () => null, getConfig: () => ({ provider: 'gemini' }) });
   check('reports itself unconfigured without a key', unconfigured.configured === false);
   await unconfigured
     .generateAnswer('test')
     .then(() => check('refuses to call without a key', false))
     .catch((error) => check('refuses to call without a key', /No Gemini API key/.test(error.message)));
+
+  const openai = new AiService({ getApiKey: () => null, getConfig: () => ({ provider: 'openai' }) });
+  check('switches provider from settings', openai.providerId === 'openai');
+  await openai
+    .generateAnswer('test')
+    .then(() => check('OpenAI refuses to call without a key', false))
+    .catch((error) => check('OpenAI refuses to call without a key', /No OpenAI API key/.test(error.message)));
+
+  check(
+    'unknown providers fall back to gemini',
+    new AiService({ getApiKey: () => null, getConfig: () => ({ provider: 'nope' }) }).providerId === 'gemini'
+  );
+
+  // ---- prompts -------------------------------------------------------------
+  const { buildAnswerPrompt, STYLES } = require('../src/ai/prompts');
+
+  const brief = buildAnswerPrompt({ transcript: 'What is the timeline?', style: 'brief' });
+  const detailed = buildAnswerPrompt({ transcript: 'What is the timeline?', style: 'detailed' });
+  check('brief asks for 1-2 sentences', /1-2 sentences/.test(brief.prompt));
+  check('detailed asks for much more', /150-250 words/.test(detailed.prompt));
+  check('detailed allows more output tokens', detailed.maxOutputTokens > brief.maxOutputTokens * 3);
+  check('unknown style falls back to balanced', buildAnswerPrompt({ transcript: 'x' }).maxOutputTokens === STYLES.balanced.maxOutputTokens);
+
+  const interview = buildAnswerPrompt({
+    transcript: 'Tell me about a time you led a project.',
+    mode: 'interview',
+    profile: { resumeText: 'Led the payments migration at Acme, cutting latency 40%.', jobTitle: 'Staff Engineer' },
+  });
+  check('interview mode writes in first person', /FIRST PERSON/.test(interview.prompt));
+  check('interview mode includes the CV', /payments migration at Acme/.test(interview.prompt));
+  check('interview mode includes the role', /Staff Engineer/.test(interview.prompt));
+  check('interview mode forbids invention', /NEVER invent experience/.test(interview.prompt));
+  check(
+    'meeting mode leaves the CV out',
+    !/payments migration/.test(
+      buildAnswerPrompt({ transcript: 'x', profile: { resumeText: 'payments migration' } }).prompt
+    )
+  );
+  check(
+    'interview mode without a CV says so',
+    /no CV for this candidate/.test(buildAnswerPrompt({ transcript: 'x', mode: 'interview' }).prompt)
+  );
+
+  // ---- document parsing ----------------------------------------------------
+  const { extractText } = require('../src/profile/documentText');
+
+  const txt = extractText(Buffer.from('Jane Doe\nStaff Engineer\nBuilt things.'), 'cv.txt');
+  check('reads plain text CVs', txt.text.includes('Staff Engineer') && txt.needsAi === false);
+
+  const md = extractText(Buffer.from('# Jane\n- Rust\n- Go'), 'cv.md');
+  check('reads markdown CVs', md.text.includes('Rust'));
+
+  try {
+    extractText(Buffer.from('x'), 'cv.pages');
+    check('rejects unsupported types', false);
+  } catch (error) {
+    check('rejects unsupported types', /Unsupported file type/.test(error.message));
+  }
+
+  const emptyPdf = extractText(Buffer.from('%PDF-1.4 no streams here'), 'scan.pdf');
+  check('a PDF with no text layer asks for the model', emptyPdf.needsAi === true);
+
+  // A real PDF: Flate-compressed content stream with Tj show operators.
+  const pdfBody =
+    'BT /F1 12 Tf 72 720 Td (Jane Doe) Tj 0 -18 Td (Staff Engineer, Acme & Co) Tj ' +
+    '0 -18 Td (Led the payments migration, cutting p99 latency 40%.) Tj ET';
+  const compressed = require('zlib').deflateSync(Buffer.from(pdfBody, 'latin1'));
+  const realPdf = Buffer.concat([
+    Buffer.from('%PDF-1.4\n4 0 obj<</Filter/FlateDecode>>stream\n', 'latin1'),
+    compressed,
+    Buffer.from('\nendstream endobj\n%%EOF', 'latin1'),
+  ]);
+
+  const parsed = extractText(realPdf, 'cv.pdf');
+  check('extracts text from a compressed PDF', parsed.text.includes('Jane Doe'));
+  check('keeps the numbers that make a CV credible', parsed.text.includes('40%'));
+  check('splits lines on text positioning', parsed.text.split('\n').length >= 3);
+  check('a short but readable CV does not go to the model', parsed.needsAi === false, parsed.text.length);
+
+  // .docx is a zip; entry names may use either slash.
+  const { docxText } = require('../src/profile/documentText');
+  check('docxText is exported for reuse', typeof docxText === 'function');
 
   console.log(`\n${passed} checks passed${process.exitCode ? ' (with failures)' : ''}\n`);
 })().catch((error) => {

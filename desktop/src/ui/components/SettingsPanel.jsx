@@ -1,49 +1,87 @@
 import React, { useState } from 'react';
 import { Button, Card, Field, Pill, Toggle } from './ui.jsx';
 
-const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, onSelectDevice, onLogout, onOpenLogs }) => {
-  const [apiKey, setApiKey] = useState('');
+const SettingsPanel = ({
+  settings,
+  info,
+  devices,
+  state,
+  aiInfo,
+  onPatch,
+  onTestAi,
+  onSelectDevice,
+  onLogout,
+  onOpenLogs,
+}) => {
+  const [keyDraft, setKeyDraft] = useState('');
   const [firebaseKey, setFirebaseKey] = useState(settings.firebase?.apiKey || '');
   const [projectId, setProjectId] = useState(settings.firebase?.projectId || '');
   const [test, setTest] = useState(null);
   const [testing, setTesting] = useState(false);
 
+  const ai = settings.ai || {};
   const behaviour = settings.behaviour || {};
-  const gemini = settings.gemini || {};
   const audio = settings.audio || {};
 
+  const activeId = ai.provider || 'gemini';
+  const provider = aiInfo?.providers?.find((p) => p.id === activeId) || {};
+  const providerConfig = ai[activeId] || {};
+  const storedKey = settings.keys?.[activeId] || {};
+
   const saveKey = async () => {
-    if (!apiKey.trim()) return;
-    await onPatch({ geminiApiKey: apiKey.trim() });
-    setApiKey('');
+    if (!keyDraft.trim()) return;
+    await onPatch({ [`${activeId}ApiKey`]: keyDraft.trim() });
+    setKeyDraft('');
+    setTest(null);
   };
 
   const runTest = async () => {
     setTesting(true);
-    setTest(await onTestGemini());
+    setTest(await onTestAi());
     setTesting(false);
   };
 
   return (
     <div className="settings">
       <Card
-        title="Gemini"
-        subtitle="Your API key never leaves this machine - it is encrypted with Windows DPAPI and used only from the desktop process."
+        title="AI provider"
+        subtitle="Transcription and answers both run on the provider you pick here. Your key never leaves this PC."
       >
+        <div className="provider-switch">
+          {(aiInfo?.providers || []).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`provider-option${activeId === item.id ? ' is-active' : ''}`}
+              onClick={() => onPatch({ ai: { provider: item.id } })}
+            >
+              <strong>{item.label}</strong>
+              {item.configured ? <Pill tone="good">key saved</Pill> : <Pill tone="neutral">no key</Pill>}
+            </button>
+          ))}
+        </div>
+
         <div className="settings__row">
-          <Field label="API key" hint={settings.hasGeminiKey ? `Stored: ${settings.geminiKeyPreview}` : 'Get one free at aistudio.google.com/apikey'}>
+          <Field
+            label={`${provider.label || 'Provider'} API key`}
+            hint={
+              storedKey.present
+                ? `Stored: ${storedKey.preview}`
+                : `${provider.keyHint || ''} — get one at ${provider.keyUrl || ''}`
+            }
+          >
             <input
               type="password"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder={settings.hasGeminiKey ? '•••••••••••••• (replace)' : 'AIza…'}
+              value={keyDraft}
+              onChange={(event) => setKeyDraft(event.target.value)}
+              placeholder={storedKey.present ? '•••••••••••••• (replace)' : provider.keyHint}
             />
           </Field>
           <div className="settings__row-actions">
-            <Button variant="primary" size="sm" onClick={saveKey} disabled={!apiKey.trim()}>
+            <Button variant="primary" size="sm" onClick={saveKey} disabled={!keyDraft.trim()}>
               Save key
             </Button>
-            <Button variant="ghost" size="sm" onClick={runTest} loading={testing} disabled={!settings.hasGeminiKey}>
+            <Button variant="ghost" size="sm" onClick={runTest} loading={testing} disabled={!storedKey.present}>
               Test
             </Button>
           </div>
@@ -55,55 +93,75 @@ const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, 
           </p>
         )}
 
-        {!settings.encryptionAvailable && (
-          <p className="alert alert--warn">
-            Windows encryption is unavailable, so the key is kept in memory for this session only.
-          </p>
+        {provider.keyUrl && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => window.clear.invoke('system:openExternal', provider.keyUrl)}
+          >
+            Get a {provider.label} key ↗
+          </Button>
         )}
 
         <div className="settings__grid">
           <Field label="Answer model">
-            <select value={gemini.model} onChange={(event) => onPatch({ gemini: { model: event.target.value } })}>
-              <option value="gemini-2.5-flash">gemini-2.5-flash (fast, recommended)</option>
-              <option value="gemini-2.5-pro">gemini-2.5-pro (smarter, slower)</option>
-              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+            <select
+              value={providerConfig.model}
+              onChange={(event) => onPatch({ ai: { [activeId]: { model: event.target.value } } })}
+            >
+              {(provider.answerModels || []).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
             </select>
           </Field>
 
           <Field label="Transcription model">
             <select
-              value={gemini.transcribeModel}
-              onChange={(event) => onPatch({ gemini: { transcribeModel: event.target.value } })}
+              value={providerConfig.transcribeModel}
+              onChange={(event) => onPatch({ ai: { [activeId]: { transcribeModel: event.target.value } } })}
             >
-              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+              {(provider.transcribeModels || []).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
             </select>
           </Field>
 
-          <Field label="Answer style">
-            <select
-              value={gemini.answerStyle}
-              onChange={(event) => onPatch({ gemini: { answerStyle: event.target.value } })}
-            >
-              <option value="concise">Concise (1-2 sentences)</option>
-              <option value="detailed">Detailed (3-5 sentences)</option>
-            </select>
-          </Field>
-
-          <Field label="Creativity" hint={`temperature ${gemini.temperature}`}>
+          <Field label="Creativity" hint={`temperature ${providerConfig.temperature}`}>
             <input
               type="range"
               min="0"
               max="1"
               step="0.1"
-              value={gemini.temperature}
-              onChange={(event) => onPatch({ gemini: { temperature: Number(event.target.value) } })}
+              value={providerConfig.temperature ?? 0.3}
+              onChange={(event) =>
+                onPatch({ ai: { [activeId]: { temperature: Number(event.target.value) } } })
+              }
             />
           </Field>
         </div>
       </Card>
 
-      <Card title="Audio" subtitle="System audio follows your Windows playback device - Bluetooth, USB or laptop speakers.">
+      <Card title="Answer length" subtitle="How much the assistant says for each question">
+        <div className="style-switch">
+          {(aiInfo?.styles || []).map((style) => (
+            <button
+              key={style.id}
+              type="button"
+              className={`style-option${(ai.answerStyle || 'balanced') === style.id ? ' is-active' : ''}`}
+              onClick={() => onPatch({ ai: { answerStyle: style.id } })}
+            >
+              <strong>{style.label}</strong>
+              <span>{style.hint}</span>
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <Card title="Audio" subtitle="System audio follows your Windows playback device - Bluetooth, USB or speakers.">
         <Field label="Capture source">
           <select value={audio.deviceId} onChange={(event) => onSelectDevice(event.target.value)}>
             {devices.map((device) => (
@@ -126,7 +184,10 @@ const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, 
             />
           </Field>
 
-          <Field label="Voice sensitivity" hint={audio.vadSensitivity > 0.7 ? 'Picks up quiet speech' : 'Ignores background noise'}>
+          <Field
+            label="Voice sensitivity"
+            hint={audio.vadSensitivity > 0.7 ? 'Picks up quiet speech' : 'Ignores background noise'}
+          >
             <input
               type="range"
               min="0"
@@ -155,13 +216,13 @@ const SettingsPanel = ({ settings, info, devices, state, onPatch, onTestGemini, 
           checked={behaviour.answerOnlyQuestions}
           onChange={(value) => onPatch({ behaviour: { answerOnlyQuestions: value } })}
           label="Only answer detected questions"
-          hint="Off means every transcript segment is sent to Gemini - more answers, more quota"
+          hint="Off means every transcript segment is sent to the model - more answers, more quota"
         />
         <Toggle
           checked={behaviour.sendTranscriptToCloud}
           onChange={(value) => onPatch({ behaviour: { sendTranscriptToCloud: value } })}
           label="Sync transcript to the cloud"
-          hint="Off keeps transcripts on this PC; answers are still sent to your phone"
+          hint="Off keeps transcripts on this PC; answers still reach your phone"
         />
         <Toggle
           checked={behaviour.autoStartCapture}
