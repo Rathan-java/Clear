@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  HTTPS everywhere, with one exception: plain HTTP to a backend running on your
-  own machine while you develop (10.0.2.2 is the host from the emulator).
-  Delete the domain-config block for a hardened production build.
+  RELEASE config: HTTPS only, with a short allow-list for local development.
+
+  Android matches these entries exactly - there is no CIDR/subnet syntax - so
+  if you want a *release* APK to talk to a backend on your LAN over plain HTTP,
+  add that exact address below:
+
+      <domain includeSubdomains="false">192.168.1.28</domain>
+
+  Debug builds do not need this: src/debug/res/xml/network_security_config.xml
+  allows cleartext everywhere.
+
+  Once your backend is on HTTPS, delete the whole domain-config block.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
@@ -12,10 +21,10 @@
     </base-config>
 
     <domain-config cleartextTrafficPermitted="true">
+        <!-- Android emulator's view of the host machine -->
         <domain includeSubdomains="true">10.0.2.2</domain>
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">192.168.0.0</domain>
-        <domain includeSubdomains="true">192.168.1.0</domain>
+        <!-- Add your own LAN address here for release-over-HTTP testing -->
     </domain-config>
 </network-security-config>

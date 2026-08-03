@@ -21,6 +21,8 @@ class NotificationService {
     importance: Importance.high,
   );
 
+  /// Never throws: on platforms without a notification plugin (web, desktop)
+  /// the app must still start, just without notifications.
   Future<void> init() async {
     if (_ready) return;
 
@@ -28,19 +30,28 @@ class NotificationService {
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
     );
 
-    await _plugin.initialize(
-      settings,
-      onDidReceiveNotificationResponse: (response) => onTapped?.call(response.payload),
-    );
+    try {
+      await _plugin.initialize(
+        settings,
+        onDidReceiveNotificationResponse: (response) => onTapped?.call(response.payload),
+      );
 
-    final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    await android?.createNotificationChannel(_channel);
-    _ready = true;
+      final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await android?.createNotificationChannel(_channel);
+      _ready = true;
+    } catch (error) {
+      debugPrint('Notifications unavailable on this platform: $error');
+    }
   }
 
   Future<bool> requestPermission() async {
-    final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    return await android?.requestNotificationsPermission() ?? false;
+    try {
+      final android = _plugin.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      return await android?.requestNotificationsPermission() ?? false;
+    } catch (error) {
+      debugPrint('Notification permission unavailable: $error');
+      return false;
+    }
   }
 
   Future<void> showAnswer(Answer answer) async {

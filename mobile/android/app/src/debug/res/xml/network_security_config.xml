@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG ONLY.
+
+  Android matches network-security-config entries exactly - there is no CIDR
+  syntax - so a fixed list can never cover whatever LAN address your PC happens
+  to get today. Debug builds therefore allow cleartext anywhere, which is what
+  you want when pointing the app at http://192.168.x.x:8080 during development.
+
+  The release build uses the strict config in src/main/res/xml/ instead.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -27,7 +27,9 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "app.clear.mobile"
-    compileSdk = 34
+    // Plugins (shared_preferences_android, jni) compile against 36; compiling
+    // against the highest is backward compatible and silences the warning.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -43,7 +45,9 @@ android {
 
     defaultConfig {
         applicationId = "app.clear.mobile"
-        minSdk = 23
+        minSdkVersion = flutter.minSdkVersion
+        // Stays at 34 deliberately: API 35 forces edge-to-edge layout, which
+        // would need insets handling throughout the UI. Bump when that is done.
         targetSdk = 34
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName

@@ -64,18 +64,18 @@ const createWindow = () => {
 
   if (DEV_SERVER) {
     window.loadURL(DEV_SERVER);
-    window.webContents.openDevTools({ mode: 'detach' });
+    // Opt-in only: a detached DevTools window on every launch looks like the
+    // app failed to start. Use CLEAR_DEVTOOLS=1, or Ctrl+Shift+I once running.
+    if (process.env.CLEAR_DEVTOOLS === '1') window.webContents.openDevTools({ mode: 'detach' });
   } else {
     window.loadFile(path.join(__dirname, '..', '..', 'dist', 'ui', 'index.html'));
   }
 
-  // Minimise / close go to the tray instead of killing the capture.
-  window.on('minimize', (event) => {
-    if (services?.settings.get('behaviour.minimiseToTray')) {
-      event.preventDefault();
-      window.hide();
-    }
-  });
+  // Minimise stays a normal minimise - the window keeps its taskbar button.
+  // Hiding here meant Win+D or "Show desktop" made the app vanish completely,
+  // leaving only a tray icon most people never look for. Closing is what sends
+  // it to the tray (see below), which is the behaviour people expect from a
+  // background app.
 
   window.on('close', (event) => {
     if (!quitting && services?.settings.get('behaviour.minimiseToTray')) {
@@ -475,13 +475,25 @@ app.whenReady().then(async () => {
   });
   tray.create();
 
-  const startHidden =
-    wasAutoLaunched(app) || services.settings.get('behaviour.startMinimised');
+  const startHidden = wasAutoLaunched(app) || services.settings.get('behaviour.startMinimised');
+  log.info('Window created', { startHidden, devServer: Boolean(DEV_SERVER) });
 
-  mainWindow.once('ready-to-show', () => {
-    if (!startHidden) mainWindow.show();
+  let shown = false;
+  const reveal = (reason) => {
+    if (shown || startHidden || !mainWindow || mainWindow.isDestroyed()) return;
+    shown = true;
+    mainWindow.show();
+    mainWindow.focus();
     if (services.settings.get('ui.alwaysOnTop')) mainWindow.setAlwaysOnTop(true);
-  });
+    log.info('Window shown', { reason });
+  };
+
+  mainWindow.once('ready-to-show', () => reveal('ready-to-show'));
+
+  // Safety net: ready-to-show does not fire reliably in every situation - a
+  // slow dev server, a renderer that throws before its first paint, or certain
+  // GPU/compositor states. Never leave the user staring at an empty desktop.
+  setTimeout(() => reveal('timeout'), 5000);
 
   globalShortcut.register('CommandOrControl+Shift+L', () => {
     services.pipeline.toggle().catch((error) => log.error('Hotkey toggle failed', { error: error.message }));
@@ -495,6 +507,12 @@ app.whenReady().then(async () => {
   });
 
   await bootstrap();
+  log.info('Startup complete');
+}).catch((error) => {
+  // Without this, anything that throws during startup vanishes silently and
+  // the app just never appears.
+  log.error('Startup failed', { error: error.message, stack: error.stack });
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
 });
 
 app.on('window-all-closed', () => {
@@ -519,6 +537,13 @@ app.on('will-quit', () => {
 
 process.on('uncaughtException', (error) => {
   log.error('Uncaught exception in main', { error: error.message, stack: error.stack });
+});
+
+process.on('unhandledRejection', (reason) => {
+  log.error('Unhandled rejection in main', {
+    error: reason?.message || String(reason),
+    stack: reason?.stack,
+  });
 });
 
 const truncate = (text, max) => {
