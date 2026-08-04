@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { extractText, mimeFor, SUPPORTED } = require('./documentText');
+const { extractText, looksLikeProse, mimeFor, SUPPORTED } = require('./documentText');
 
 /**
  * The candidate profile used by interview mode: CV text, the role being
@@ -117,6 +117,14 @@ class ProfileStore extends EventEmitter {
     const clean = String(text || '').replace(/\r/g, '').trim();
     if (clean.length < 50) {
       throw new Error('Could not find readable text in that file. Try a different export, or paste the text in.');
+    }
+
+    // Last line of defence: never store something that is not readable prose,
+    // whichever route produced it. Garbage here becomes garbage in the prompt.
+    if (!looksLikeProse(clean)) {
+      throw new Error(
+        'That file did not decode into readable text. Try "Save as PDF" from Word, export as .docx, or paste the text in.'
+      );
     }
 
     this.data.resumeText = clean;

@@ -39,6 +39,9 @@ class Pipeline extends EventEmitter {
     this.running = false;
     this.thinking = false;
     this.answerLatencies = [];
+    this.peakLevel = 0;
+    this.diagnosticsTimer = null;
+    this.silentWindows = 0;
 
     this.state = {
       running: false,
@@ -71,6 +74,7 @@ class Pipeline extends EventEmitter {
     this.audio.on('pcm', (chunk) => this.speech.streamAudio(chunk));
     this.audio.on('level', ({ level }) => {
       this.state.capture.level = level;
+      if (level > this.peakLevel) this.peakLevel = level;
       this.emitState({ quiet: true });
     });
     this.audio.on('state', (state) => {
@@ -376,6 +380,68 @@ class Pipeline extends EventEmitter {
     }
   }
 
+  // ---- diagnostics --------------------------------------------------------
+
+  /**
+   * "It didn't hear anything" is impossible to debug after the fact unless the
+   * app says what it was hearing at the time. Every 10 seconds while running,
+   * record the loudest thing that arrived and how far it got.
+   */
+  startDiagnostics() {
+    this.stopDiagnostics();
+    this.peakLevel = 0;
+    this.silentWindows = 0;
+
+    this.diagnosticsTimer = setInterval(() => {
+      const speech = this.speech.metrics();
+      const capture = this.audio.state();
+      const peak = this.peakLevel;
+      this.peakLevel = 0;
+
+      this.log?.info('Audio check', {
+        peakLevel: Number(peak.toFixed(4)),
+        noiseFloor: speech.noiseFloor,
+        segments: speech.segments,
+        transcribed: speech.transcribed,
+        answers: this.state.stats.answers,
+        device: capture.deviceLabel,
+        capturedSeconds: Math.round((capture.capturedMs || 0) / 1000),
+      });
+
+      // Effectively digital silence: the stream is open but carrying nothing.
+      if (peak < 0.004) {
+        this.silentWindows += 1;
+        if (this.silentWindows === 2) {
+          const message =
+            'No sound is reaching Clear. Check that the meeting is playing through your default Windows playback device.';
+          this.state.notice = { type: 'warn', message };
+          this.log?.warn('Capturing silence', { device: capture.deviceLabel, seconds: this.silentWindows * 10 });
+          this.emitState();
+        }
+      } else {
+        this.silentWindows = 0;
+
+        // Sound is arriving but nothing ever closes a segment - the voice
+        // threshold is too high for this source.
+        if (speech.segments === 0 && peak > 0.01 && (capture.capturedMs || 0) > 25000) {
+          this.state.notice = {
+            type: 'warn',
+            message: `Hearing audio (peak ${peak.toFixed(2)}) but not detecting speech. Raise Voice sensitivity in Settings.`,
+          };
+          this.log?.warn('Audio present but no speech detected', { peak, noiseFloor: speech.noiseFloor });
+          this.emitState();
+        }
+      }
+    }, 10000);
+
+    this.diagnosticsTimer.unref?.();
+  }
+
+  stopDiagnostics() {
+    if (this.diagnosticsTimer) clearInterval(this.diagnosticsTimer);
+    this.diagnosticsTimer = null;
+  }
+
   // ---- lifecycle ----------------------------------------------------------
 
   async start() {
@@ -393,6 +459,7 @@ class Pipeline extends EventEmitter {
     this.running = true;
     this.state.notice = { type: 'info', message: 'Listening' };
     this.log?.info('Pipeline started', { fastMode: this.ai.fastMode, provider: this.ai.providerId });
+    this.startDiagnostics();
     this.emitState();
 
     if (this.auth.signedIn && !this.sync.meetingId) {
@@ -406,6 +473,7 @@ class Pipeline extends EventEmitter {
     if (!this.running) return this.state;
 
     this.speech.enabled = false;
+    this.stopDiagnostics();
     await this.audio.stopCapture();
     this.running = false;
     this.state.transcript.live = '';
@@ -446,6 +514,7 @@ class Pipeline extends EventEmitter {
   }
 
   destroy() {
+    this.stopDiagnostics();
     this.speech.fastHandler = null;
     this.removeAllListeners();
   }

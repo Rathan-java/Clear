@@ -270,10 +270,28 @@ class CaptureEngine {
   }
 }
 
-/** Installs the command listener. Call once, from the app root. */
+/**
+ * Only ever one engine per window.
+ *
+ * React StrictMode runs effects twice in development, which installed two
+ * engines: both answered every "start" command, both opened their own capture
+ * stream, and both pushed PCM into the same buffer in the main process. The
+ * result was interleaved frames from two streams - audio that no longer
+ * decodes as speech. The give-away was "Capture started" appearing twice in
+ * the log.
+ */
+let installed = null;
+
+/** Installs the command listener. Safe to call more than once. */
 export const installCaptureBridge = ({ onLevel } = {}) => {
+  if (installed) {
+    if (onLevel) installed.onLevel = onLevel;
+    return installed;
+  }
+
   const engine = new CaptureEngine();
   engine.onLevel = onLevel;
+  installed = engine;
 
   const reply = (requestId, result, error) => {
     if (!requestId) return;
@@ -310,6 +328,7 @@ export const installCaptureBridge = ({ onLevel } = {}) => {
   window.addEventListener('beforeunload', () => {
     engine.stop();
     unsubscribe();
+    installed = null;
   });
 
   return engine;

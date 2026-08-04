@@ -114,8 +114,13 @@ const pdfStreams = (buffer) => {
     try {
       streams.push(zlib.inflateSync(raw));
     } catch {
-      // Not Flate (or not compressed at all) - keep it if it looks like text.
-      if (raw.includes(Buffer.from('Tj')) || raw.includes(Buffer.from('TJ'))) streams.push(raw);
+      // Not Flate. It could be ASCII85, LZW, an encrypted stream, or an image.
+      // Keeping it "because it contains the bytes Tj somewhere" is how binary
+      // noise ends up being stored as somebody's CV, so only accept it if it
+      // actually reads as a PDF content stream.
+      const head = raw.subarray(0, 2048).toString('latin1');
+      const looksLikeContent = /\bBT\b[\s\S]*\b(Tj|TJ)\b/.test(head) && /\(|\</.test(head);
+      if (looksLikeContent) streams.push(raw);
     }
 
     index = buffer.indexOf(marker, end + endMarker.length);
@@ -188,6 +193,34 @@ const pdfText = (buffer) => {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * Does this actually read like prose, or is it decoded noise?
+ *
+ * A PDF whose streams we failed to decode properly yields output that passes a
+ * naive length check but is meaningless - and meaningless text silently
+ * becomes the candidate's "CV". Real writing has spaces roughly every 5-6
+ * characters, is mostly letters, and contains common English words.
+ */
+const looksLikeProse = (text) => {
+  const value = String(text || '').trim();
+  if (value.length < 60) return false;
+
+  const letters = (value.match(/[a-zA-Z]/g) || []).length;
+  const spaces = (value.match(/\s/g) || []).length;
+  const words = value.split(/\s+/).filter((word) => /^[a-zA-Z][a-zA-Z'-]*$/.test(word));
+
+  const letterRatio = letters / value.length;
+  const wordsPerChar = words.length / value.length;
+  const hasCommonWords = /\b(the|and|with|for|from|team|work|experience|project|developed|using)\b/i.test(value);
+
+  return (
+    letterRatio > 0.55 && // mostly letters, not symbols
+    spaces / value.length > 0.08 && // actually has word breaks
+    wordsPerChar > 0.06 && // real words, not letter soup
+    hasCommonWords // reads like English
+  );
+};
+
 const SUPPORTED = ['.txt', '.md', '.markdown', '.docx', '.pdf'];
 
 const mimeFor = (extension) =>
@@ -221,11 +254,11 @@ const extractText = (buffer, filename) => {
     } catch {
       text = '';
     }
-    // A scanned CV has no text layer and yields essentially nothing, so only
-    // then is it worth paying a model to read the pixels. The bar has to be
-    // low: a short-but-real CV must not be thrown away just for being terse.
-    const usable = text.replace(/\s+/g, ' ').trim().length >= 80;
-    return { text, method: 'pdf', needsAi: !usable };
+    // Hand it to a model if there is no text layer (a scan), or if what we got
+    // back is not readable prose - a partially decoded stream is worse than
+    // nothing, because it looks like success.
+    const usable = text.replace(/\s+/g, ' ').trim().length >= 80 && looksLikeProse(text);
+    return { text: usable ? text : '', method: 'pdf', needsAi: !usable };
   }
 
   if (['.png', '.jpg', '.jpeg'].includes(extension)) {
@@ -235,4 +268,4 @@ const extractText = (buffer, filename) => {
   throw new Error(`Unsupported file type "${extension || filename}". Use PDF, DOCX, TXT or MD.`);
 };
 
-module.exports = { extractText, docxText, pdfText, mimeFor, SUPPORTED };
+module.exports = { extractText, docxText, pdfText, looksLikeProse, mimeFor, SUPPORTED };
